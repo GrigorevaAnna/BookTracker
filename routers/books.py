@@ -1,23 +1,22 @@
 from fastapi import APIRouter
 from typing import List
-from models.pydantic_models import BookWithProgress, BookStatus
+from models.pydantic_models import BookWithProgress, BookStatus, Book, UserBook
 from database.fake_db import books_db, user_books_db
 
 router = APIRouter(prefix="/api", tags=["books"])
 
 
-# Новый эндпоинт: все книги (с фильтром по статусу или "ALL")
+# Эндпоинт для получения книг пользователя
 @router.get("/user/{user_id}/books", response_model=List[BookWithProgress])
 def get_user_books(
         user_id: str,
-        status: BookStatus | None = None  # Если None — возвращаем ВСЁ
+        status: BookStatus | None = None
 ):
     result = []
     for (uid, book_id), user_book in user_books_db.items():
         if uid != user_id:
             continue
 
-        # Фильтр по статусу (если передан)
         if status is not None and user_book.status != status:
             continue
 
@@ -32,3 +31,10 @@ def get_user_books(
             progress=progress
         ))
     return result
+
+
+# Эндпоинт для добавления книги (если есть)
+@router.post("/user/{user_id}/add_book")
+def add_book(user_id: str, book: Book):
+    # Здесь логика добавления книги
+    return {"message": "Книга добавлена", "book": book}
