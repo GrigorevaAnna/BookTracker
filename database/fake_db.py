@@ -25,17 +25,15 @@ def init_sample_data():
     user_id = "user_123"
     connections = [
         ("1", BookStatus.FINISHED, 551, 5.0, "Шедевр!"),
-        ("2", BookStatus.READING, 180),
-        ("3", BookStatus.WANT_TO_READ, 0),
-        ("4", BookStatus.READING, 800),
-        ("5", BookStatus.WANT_TO_READ, 0),
+        ("2", BookStatus.READING, 180, 0.0, ""),
+        ("3", BookStatus.WANT_TO_READ, 0, 0.0, ""),
+        ("4", BookStatus.READING, 800, 0.0, ""),
+        ("5", BookStatus.WANT_TO_READ, 0, 0.0, ""),
         ("6", BookStatus.FINISHED, 399, 4.8, "Волшебство"),
     ]
 
     for conn in connections:
-        book_id, status, current_page = conn[0], conn[1], conn[2]
-        rating = conn[3] if len(conn) > 3 else None
-        review = conn[4] if len(conn) > 4 else None
+        book_id, status, current_page, rating, review = conn
 
         user_books_db[(user_id, book_id)] = UserBook(
             userId=user_id,
