@@ -10,25 +10,25 @@ app = FastAPI(
     version="1.0.0"
 )
 
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Для тестов. Можно указать конкретные домены
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Подключаем роуты
-app.include_router(books_router)
-
+# ✅ СНАЧАЛА корневой обработчик
 @app.get("/")
 def root():
     return {"message": "BookTracker Backend работает!", "docs": "/docs"}
 
+# ✅ ПОТОМ роутер
+app.include_router(books_router)
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))  # Render использует порт 10000
+    port = int(os.environ.get("PORT", 10000))
     print("="*60)
     print(f"БЭКЕНД ЗАПУЩЕН на порту {port}")
     print("="*60)
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)  # reload=False для продакшена
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
