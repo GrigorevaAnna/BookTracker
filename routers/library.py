@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from typing import List, Optional
 from database.database import get_db
 from models.sql_models import (
@@ -14,11 +14,10 @@ from models.pydantic_models import (
 
 router = APIRouter(prefix="/api", tags=["library"])
 
-
 # Эндпоинт для получения книг пользователя с прогрессом
 @router.get("/user/{user_id}/books", response_model=List[КнигаСАвтором])
 def get_user_books(
-        user_id: int,
+        user_id: str,
         status: Optional[BookStatus] = None,
         db: Session = Depends(get_db)
 ):
