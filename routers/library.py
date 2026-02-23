@@ -1,33 +1,49 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, or_
 from typing import List, Optional
 from database.database import get_db
 from models.sql_models import (
     Книги, Авторы, Произведения, Труд, Содержание,
-    Аккаунты, Сессия_статус, Вишлист, Сессии, Цитаты
+    Аккаунты, Сессия_статус, Вишлист, Сессии, Цитаты,
+    Тэги, Связь_цитаты_тэги
 )
 from models.pydantic_models import (
-    КнигаBase, КнигаСАвтором, СессияСтатусBase,
-    АккаунтBase, ЦитатаBase, BookStatus
+    ApiBookWithProgress, KotlinBook, KotlinUserBook, KotlinUser,
+    BookStatus, status_from_db, status_to_db
 )
 
 router = APIRouter(prefix="/api", tags=["library"])
 
-# Эндпоинт для получения книг пользователя с прогрессом
-@router.get("/user/{user_id}/books", response_model=List[КнигаСАвтором])
+
+# ============================================
+# 1. ВСЯ БИБЛИОТЕКА ПОЛЬЗОВАТЕЛЯ (с фильтром по статусу)
+# ============================================
+@router.get("/user/{user_id}/books", response_model=List[ApiBookWithProgress])
 def get_user_books(
         user_id: str,
-        status: Optional[BookStatus] = None,
+        status: Optional[BookStatus] = None,  # Если None - все книги
         db: Session = Depends(get_db)
 ):
-    """Получить книги пользователя с фильтром по статусу"""
+    """
+    Получить все книги пользователя с фильтром по статусу
+    - Без status: все книги пользователя
+    - С status=READING: только читаемые
+    - С status=WANT_TO_READ: только вишлист
+    - С status=FINISHED: только прочитанные
+    """
+    # Проверяем существование пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        return []  # Возвращаем пустой список, если пользователь не найден
 
-    # Получаем статусы чтения пользователя
+    # Базовый запрос статусов пользователя
     query = db.query(Сессия_статус).filter(Сессия_статус.id_пользователя == user_id)
 
+    # Фильтр по статусу (конвертируем API статус в статус БД)
     if status:
-        query = query.filter(Сессия_статус.Статус == status.value)
+        db_status = status_to_db(status)
+        query = query.filter(Сессия_статус.Статус == db_status)
 
     user_statuses = query.all()
 
@@ -60,62 +76,117 @@ def get_user_books(
         for t in труд:
             автор = db.query(Авторы).filter(Авторы.id_автора == t.id_автора).first()
             if автор:
-                авторы.append(автор)
+                автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                авторы.append(автор_name)
 
-        # Создаем объект книги с авторами
-        книга_с_автором = КнигаСАвтором(
-            книга=КнигаBase.from_orm(книга),
-            авторы=[АвторBase.from_orm(a) for a in авторы]
+        # Конвертируем в Kotlin модели
+        kotlin_book = KotlinBook.from_db_book(книга, авторы)
+
+        # Конвертируем статус
+        kotlin_user_book = KotlinUserBook(
+            userId=us.id_пользователя,
+            bookId=книга.id_книги,
+            status=status_from_db(us.Статус),
+            currentPage=us.current_page,
+            rating=us.Рейтинг or 0.0,
+            review=us.review or "",
+            startDate=us.start_date or "",
+            endDate=us.end_date or "",
+            addedDate=us.added_date or "",
+            readingTimeMinutes=us.reading_time_minutes or 0
         )
 
-        result.append(книга_с_автором)
+        # Вычисляем прогресс
+        progress = round(us.current_page / книга.Количество_страниц, 3) if книга.Количество_страниц > 0 else 0.0
+
+        result.append(ApiBookWithProgress(
+            book=kotlin_book,
+            userBook=kotlin_user_book,
+            progress=progress
+        ))
 
     return result
 
 
-# Эндпоинт для получения информации о пользователе
-@router.get("/users/{user_id}", response_model=АккаунтBase)
-def get_user(user_id: str, db: Session = Depends(get_db)):
+# ============================================
+# 2. ТОЛЬКО КНИГИ В ВИШЛИСТЕ (WANT_TO_READ)
+# ============================================
+@router.get("/user/{user_id}/wishlist", response_model=List[ApiBookWithProgress])
+def get_user_wishlist(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить только книги из вишлиста пользователя"""
+    return get_user_books(user_id, BookStatus.WANT_TO_READ, db)
+
+
+# ============================================
+# 3. ТОЛЬКО КНИГИ В ПРОЦЕССЕ ЧТЕНИЯ (READING)
+# ============================================
+@router.get("/user/{user_id}/reading", response_model=List[ApiBookWithProgress])
+def get_user_reading(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить только книги, которые пользователь сейчас читает"""
+    return get_user_books(user_id, BookStatus.READING, db)
+
+
+# ============================================
+# 4. ТОЛЬКО ПРОЧИТАННЫЕ КНИГИ (FINISHED)
+# ============================================
+@router.get("/user/{user_id}/finished", response_model=List[ApiBookWithProgress])
+def get_user_finished(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить только прочитанные книги"""
+    return get_user_books(user_id, BookStatus.FINISHED, db)
+
+
+# ============================================
+# 5. ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ
+# ============================================
+@router.get("/users/{user_id}", response_model=KotlinUser)
+def get_user(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить информацию о пользователе"""
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-    return user
+        # Возвращаем пользователя с ID, если не найден
+        return KotlinUser(id=user_id)
+
+    return KotlinUser.from_db_user(user)
 
 
-# Эндпоинт для поиска книг
-@router.get("/books/search", response_model=List[КнигаСАвтором])
+# ============================================
+# 6. ПОИСК КНИГ ПО НАЗВАНИЮ ИЛИ АВТОРУ
+# ============================================
+@router.get("/books/search", response_model=List[KotlinBook])
 def search_books(
         query: str,
         db: Session = Depends(get_db)
 ):
     """Поиск книг по названию или автору"""
+    if not query or len(query) < 2:
+        return []
+
+    search_pattern = f"%{query}%"
 
     # Ищем по названию книги
-    книги = db.query(Книги).filter(Книги.Название.ilike(f"%{query}%")).all()
+    книги = db.query(Книги).filter(
+        or_(
+            Книги.Название.ilike(search_pattern),
+            Книги.Автор.ilike(search_pattern)
+        )
+    ).limit(20).all()
 
-    # Ищем по автору
-    авторы = db.query(Авторы).filter(
-        (Авторы.Имя.ilike(f"%{query}%")) |
-        (Авторы.Фамилия.ilike(f"%{query}%"))
-    ).all()
-
-    for автор in авторы:
-        труд = db.query(Труд).filter(Труд.id_автора == автор.id_автора).all()
-        for t in труд:
-            содержание = db.query(Содержание).filter(
-                Содержание.id_произведения == t.id_произведения
-            ).first()
-            if содержание:
-                книга = db.query(Книги).filter(
-                    Книги.id_книги == содержание.id_книги
-                ).first()
-                if книга and книга not in книги:
-                    книги.append(книга)
-
-    # Собираем результат с авторами
     result = []
     for книга in книги:
-        авторы_книги = []
+        # Получаем авторов для этой книги
+        авторы = []
         содержание = db.query(Содержание).filter(
             Содержание.id_книги == книга.id_книги
         ).all()
@@ -128,97 +199,239 @@ def search_books(
                 автор = db.query(Авторы).filter(
                     Авторы.id_автора == t.id_автора
                 ).first()
-                if автор and автор not in авторы_книги:
-                    авторы_книги.append(автор)
+                if автор:
+                    автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                    if автор_name not in авторы:
+                        авторы.append(автор_name)
 
-        книга_с_автором = КнигаСАвтором(
-            книга=КнигаBase.from_orm(книга),
-            авторы=[АвторBase.from_orm(a) for a in авторы_книги]
-        )
-        result.append(книга_с_автором)
-
-    return result
-
-
-# Эндпоинт для получения вишлиста пользователя
-@router.get("/user/{user_id}/wishlist", response_model=List[КнигаСАвтором])
-def get_wishlist(user_id: str, db: Session = Depends(get_db)):
-    вишлист = db.query(Вишлист).filter(Вишлист.id_пользователя == user_id).all()
-
-    result = []
-    for item in вишлист:
-        книга = db.query(Книги).filter(Книги.id_книги == item.id_книги).first()
-        if книга:
-            # Получаем авторов
-            авторы = []
-            содержание = db.query(Содержание).filter(
-                Содержание.id_книги == книга.id_книги
-            ).all()
-
-            for с in содержание:
-                труд = db.query(Труд).filter(
-                    Труд.id_произведения == с.id_произведения
-                ).all()
-                for t in труд:
-                    автор = db.query(Авторы).filter(
-                        Авторы.id_автора == t.id_автора
-                    ).first()
-                    if автор and автор not in авторы:
-                        авторы.append(автор)
-
-            книга_с_автором = КнигаСАвтором(
-                книга=КнигаBase.from_orm(книга),
-                авторы=[АвторBase.from_orm(a) for a in авторы]
-            )
-            result.append(книга_с_автором)
+        kotlin_book = KotlinBook.from_db_book(книга, авторы)
+        result.append(kotlin_book)
 
     return result
 
 
-# Эндпоинт для получения цитат пользователя
-@router.get("/user/{user_id}/quotes", response_model=List[ЦитатаBase])
-def get_user_quotes(user_id: str, db: Session = Depends(get_db)):
-    цитаты = db.query(Цитаты).filter(Цитаты.id_пользователя == user_id).all()
-    return [ЦитатаBase.from_orm(q) for q in цитаты]
-
-
-
-
-# Эндпоинт для обновления статуса чтения
-@router.post("/user/{user_id}/book/{book_id}/status")
-def update_book_status(
-        user_id: str,
-        book_id: int,
-        status: BookStatus,
-        current_page: Optional[int] = None,
+# ============================================
+# 7. ПОЛУЧЕНИЕ КОНКРЕТНОЙ КНИГИ
+# ============================================
+@router.get("/books/{book_id}", response_model=KotlinBook)
+def get_book(
+        book_id: str,
         db: Session = Depends(get_db)
 ):
-    # Находим произведение для книги
-    содержание = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not содержание:
+    """Получить информацию о конкретной книге"""
+    книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not книга:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
-    # Обновляем или создаем статус
-    статус = db.query(Сессия_статус).filter(
+    # Получаем авторов
+    авторы = []
+    содержание = db.query(Содержание).filter(
+        Содержание.id_книги == книга.id_книги
+    ).all()
+
+    for с in содержание:
+        труд = db.query(Труд).filter(
+            Труд.id_произведения == с.id_произведения
+        ).all()
+        for t in труд:
+            автор = db.query(Авторы).filter(
+                Авторы.id_автора == t.id_автора
+            ).first()
+            if автор:
+                автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                авторы.append(автор_name)
+
+    return KotlinBook.from_db_book(книга, авторы)
+
+
+# ============================================
+# 8. ДОБАВЛЕНИЕ КНИГИ В ВИШЛИСТ
+# ============================================
+@router.post("/user/{user_id}/wishlist/add/{book_id}")
+def add_to_wishlist(
+        user_id: str,
+        book_id: str,
+        db: Session = Depends(get_db)
+):
+    """Добавить книгу в вишлист пользователя"""
+    # Проверяем существование пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Проверяем существование книги
+    книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not книга:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    # Получаем произведение для этой книги
+    содержание = db.query(Содержание).filter(
+        Содержание.id_книги == book_id
+    ).first()
+
+    if not содержание:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    # Проверяем, нет ли уже в вишлисте
+    existing = db.query(Вишлист).filter(
+        and_(
+            Вишлист.id_пользователя == user_id,
+            Вишлист.id_книги == book_id
+        )
+    ).first()
+
+    if existing:
+        return {"message": "Книга уже в вишлисте"}
+
+    # Добавляем в вишлист
+    wishlist_item = Вишлист(
+        id_пользователя=user_id,
+        id_книги=book_id,
+        дата_добавления=datetime.now().isoformat(),
+        приоритет=1
+    )
+    db.add(wishlist_item)
+
+    # Создаем запись в Сессия_статус
+    status_item = Сессия_статус(
+        id_пользователя=user_id,
+        id_произведения=содержание.id_произведения,
+        Статус=status_to_db(BookStatus.WANT_TO_READ),
+        current_page=0,
+        added_date=datetime.now().isoformat()
+    )
+    db.add(status_item)
+
+    db.commit()
+
+    return {"message": "Книга добавлена в вишлист"}
+
+
+# ============================================
+# 9. ОБНОВЛЕНИЕ СТАТУСА КНИГИ
+# ============================================
+@router.put("/user/{user_id}/book/{book_id}/status")
+def update_book_status(
+        user_id: str,
+        book_id: str,
+        status: BookStatus,
+        current_page: Optional[int] = None,
+        rating: Optional[float] = None,
+        review: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    """Обновить статус книги (начать читать, закончить и т.д.)"""
+    # Получаем произведение для книги
+    содержание = db.query(Содержание).filter(
+        Содержание.id_книги == book_id
+    ).first()
+
+    if not содержание:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    # Ищем существующий статус
+    user_status = db.query(Сессия_статус).filter(
         and_(
             Сессия_статус.id_пользователя == user_id,
             Сессия_статус.id_произведения == содержание.id_произведения
         )
     ).first()
 
-    if статус:
-        статус.Статус = status.value
+    if user_status:
+        # Обновляем существующий
+        user_status.Статус = status_to_db(status)
         if current_page is not None:
-            статус.current_page = current_page
-        статус.updated_at = func.now()
+            user_status.current_page = current_page
+        if rating is not None:
+            user_status.Рейтинг = rating
+        if review is not None:
+            user_status.review = review
+
+        # Если книга закончена
+        if status == BookStatus.FINISHED:
+            книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
+            if книга:
+                user_status.current_page = книга.Количество_страниц
+                user_status.end_date = datetime.now().isoformat()
     else:
-        статус = Сессия_статус(
+        # Создаем новый статус
+        user_status = Сессия_статус(
             id_пользователя=user_id,
             id_произведения=содержание.id_произведения,
-            Статус=status.value,
-            current_page=current_page or 0
+            Статус=status_to_db(status),
+            current_page=current_page or 0,
+            Рейтинг=rating,
+            review=review,
+            added_date=datetime.now().isoformat()
         )
-        db.add(статус)
+        db.add(user_status)
 
     db.commit()
-    return {"message": "Статус обновлен"}
+
+    return {"message": f"Статус обновлен на {status.value}"}
+
+
+# ============================================
+# 10. ПОЛУЧЕНИЕ СТАТИСТИКИ ПОЛЬЗОВАТЕЛЯ
+# ============================================
+@router.get("/user/{user_id}/stats")
+def get_user_stats(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить статистику чтения пользователя"""
+    # Количество книг по статусам
+    status_counts = db.query(
+        Сессия_статус.Статус,
+        db.func.count().label('count')
+    ).filter(
+        Сессия_статус.id_пользователя == user_id
+    ).group_by(Сессия_статус.Статус).all()
+
+    # Общее время чтения
+    total_time = db.query(
+        db.func.sum(Сессия_статус.reading_time_minutes)
+    ).filter(
+        Сессия_статус.id_пользователя == user_id
+    ).scalar() or 0
+
+    # Всего страниц прочитано
+    total_pages = db.query(
+        db.func.sum(Сессия_статус.current_page)
+    ).filter(
+        Сессия_статус.id_пользователя == user_id,
+        Сессия_статус.Статус == 'Прочитано'
+    ).scalar() or 0
+
+    # Средний рейтинг
+    avg_rating = db.query(
+        db.func.avg(Сессия_статус.Рейтинг)
+    ).filter(
+        Сессия_статус.id_пользователя == user_id,
+        Сессия_статус.Рейтинг > 0
+    ).scalar() or 0
+
+    stats = {
+        "wishlist": 0,
+        "reading": 0,
+        "finished": 0,
+        "paused": 0,
+        "total_reading_time_minutes": total_time,
+        "total_pages_read": total_pages,
+        "average_rating": round(float(avg_rating), 1)
+    }
+
+    for status_row in status_counts:
+        db_status = status_row[0]
+        count = status_row[1]
+
+        if db_status == "Хочу прочитать":
+            stats["wishlist"] = count
+        elif db_status == "Читаю":
+            stats["reading"] = count
+        elif db_status == "Прочитано":
+            stats["finished"] = count
+        elif db_status == "Приостановлено":
+            stats["paused"] = count
+
+    return stats
