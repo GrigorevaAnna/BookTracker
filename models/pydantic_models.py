@@ -11,7 +11,7 @@ class BookStatus(str, Enum):
 
 # Модели для ваших таблиц
 class АккаунтBase(BaseModel):
-    id_пользователя: int
+    id_пользователя: str = ""
     Никнейм: str = ""
     Почта: str = ""
     Фото: Optional[str] = ""
@@ -56,7 +56,7 @@ class КнигаСАвтором(BaseModel):
     авторы: List[АвторBase] = []
 
 class СессияСтатусBase(BaseModel):
-    id_пользователя: int
+    id_пользователя: str = ""
     id_произведения: int
     Рейтинг: float = 0.0
     Статус: BookStatus = BookStatus.WANT_TO_READ

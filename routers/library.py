@@ -75,7 +75,7 @@ def get_user_books(
 
 # Эндпоинт для получения информации о пользователе
 @router.get("/users/{user_id}", response_model=АккаунтBase)
-def get_user(user_id: int, db: Session = Depends(get_db)):
+def get_user(user_id: str, db: Session = Depends(get_db)):
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
@@ -142,7 +142,7 @@ def search_books(
 
 # Эндпоинт для получения вишлиста пользователя
 @router.get("/user/{user_id}/wishlist", response_model=List[КнигаСАвтором])
-def get_wishlist(user_id: int, db: Session = Depends(get_db)):
+def get_wishlist(user_id: str, db: Session = Depends(get_db)):
     вишлист = db.query(Вишлист).filter(Вишлист.id_пользователя == user_id).all()
 
     result = []
@@ -177,15 +177,17 @@ def get_wishlist(user_id: int, db: Session = Depends(get_db)):
 
 # Эндпоинт для получения цитат пользователя
 @router.get("/user/{user_id}/quotes", response_model=List[ЦитатаBase])
-def get_user_quotes(user_id: int, db: Session = Depends(get_db)):
+def get_user_quotes(user_id: str, db: Session = Depends(get_db)):
     цитаты = db.query(Цитаты).filter(Цитаты.id_пользователя == user_id).all()
     return [ЦитатаBase.from_orm(q) for q in цитаты]
+
+
 
 
 # Эндпоинт для обновления статуса чтения
 @router.post("/user/{user_id}/book/{book_id}/status")
 def update_book_status(
-        user_id: int,
+        user_id: str,
         book_id: int,
         status: BookStatus,
         current_page: Optional[int] = None,

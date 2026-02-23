@@ -7,8 +7,7 @@ Base = declarative_base()
 
 class Аккаунты(Base):
     __tablename__ = 'Аккаунты'
-
-    id_пользователя = Column(Integer, primary_key=True, autoincrement=True)
+    id_пользователя = Column(String(50), primary_key=True)
     Никнейм = Column(String(100), nullable=False, unique=True)
     Почта = Column(String(255), nullable=False, unique=True)
     Пароль = Column(String(255), nullable=False)
@@ -165,7 +164,7 @@ class Вишлист(Base):
     __tablename__ = 'Вишлист'
 
     id_книги = Column(Integer, ForeignKey('Книги.id_книги', ondelete='CASCADE'), primary_key=True)
-    id_пользователя = Column(Integer, ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), primary_key=True)
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), primary_key=True)
     дата_добавления = Column(TIMESTAMP, default='CURRENT_TIMESTAMP')
     приоритет = Column(Integer, default=1)
 
@@ -176,7 +175,7 @@ class Вишлист(Base):
 class Сессия_статус(Base):
     __tablename__ = 'Сессия_статус'
 
-    id_пользователя = Column(Integer, ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), primary_key=True)
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), primary_key=True)
     id_произведения = Column(Integer, ForeignKey('Произведения.id_произведения', ondelete='CASCADE'), primary_key=True)
     Рейтинг = Column(Float)
     Статус = Column(String(20))
@@ -197,7 +196,7 @@ class Сессии(Base):
     __tablename__ = 'Сессии'
 
     id_сессии = Column(Integer, primary_key=True, autoincrement=True)
-    id_пользователя = Column(Integer, ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'))
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'))
     id_произведения = Column(Integer, ForeignKey('Произведения.id_произведения', ondelete='CASCADE'))
     Дата_начала = Column(TIMESTAMP, nullable=False)
     Дата_окончания = Column(TIMESTAMP)
@@ -219,7 +218,7 @@ class Цитаты(Base):
     __tablename__ = 'Цитаты'
 
     id_цитаты = Column(Integer, primary_key=True, autoincrement=True)
-    id_пользователя = Column(Integer, ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'))
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'))
     id_произведения = Column(Integer, ForeignKey('Произведения.id_произведения', ondelete='CASCADE'))
     Текст = Column(Text, nullable=False)
     Страница = Column(Integer)
