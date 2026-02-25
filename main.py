@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
-from routers.library import router as library_router
+
+# Подключаем ЕДИНЫЙ роутер
+from routers.api import router as api_router
 
 app = FastAPI(
     title="BookTracker API",
@@ -10,7 +12,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS для Android
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,19 +20,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(library_router)
+# Подключаем один роутер
+app.include_router(api_router)
 
 @app.get("/")
 def root():
-    return {
-        "message": "BookTracker API работает!",
-        "docs": "/docs"
-    }
+    return {"message": "BookTracker API работает!", "docs": "/docs"}
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))  # Render даёт свой PORT
+    port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
