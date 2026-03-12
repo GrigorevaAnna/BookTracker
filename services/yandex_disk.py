@@ -1,5 +1,6 @@
 import os
 import yadisk
+import requests
 from fastapi import UploadFile, HTTPException
 import uuid
 import tempfile
@@ -43,7 +44,6 @@ async def upload_cover_to_yandex_disk(file: UploadFile, book_id: str) -> str:
     try:
         # Сохраняем загруженный файл во временную папку
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
-            # Копируем содержимое из UploadFile во временный файл
             shutil.copyfileobj(file.file, temp_file)
             temp_file_path = temp_file.name
             print(f"📁 Временный файл: {temp_file_path}")
@@ -58,28 +58,61 @@ async def upload_cover_to_yandex_disk(file: UploadFile, book_id: str) -> str:
         y.publish(disk_file_path)
         print("✅ Файл опубликован")
 
-        # Получаем публичную ссылку (правильный метод)
-        # В некоторых версиях библиотеки метод называется get_public_link, в других - get_public_url
+        # ============================================
+        # ПОЛУЧАЕМ ПРАВИЛЬНУЮ ПРЯМУЮ ССЫЛКУ ЧЕРЕЗ API
+        # ============================================
+
+        # 1. Получаем публичную ссылку на файл (вида https://yadi.sk/d/...)
+        file_info = y.get_meta(disk_file_path)
+
+        # Извлекаем public_url из метаданных
+        if hasattr(file_info, 'public_url'):
+            public_link = file_info.public_url
+        elif hasattr(file_info, 'public_key'):
+            # Если нет public_url, формируем из public_key
+            public_link = f"https://yadi.sk/d/{file_info.public_key}"
+        else:
+            # Пробуем получить через атрибуты
+            public_key = getattr(file_info, 'public_key', None)
+            if public_key:
+                public_link = f"https://yadi.sk/d/{public_key}"
+            else:
+                raise Exception("Не удалось получить публичную ссылку на файл")
+
+        print(f"🔗 Публичная ссылка на страницу: {public_link}")
+
+        # 2. Используем REST API Яндекс.Диска для получения прямой ссылки на скачивание
+        api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
+        params = {"public_key": public_link}
+
         try:
-            # Пробуем первый вариант
-            public_link = y.get_public_link(disk_file_path)
-        except AttributeError:
-            try:
-                # Пробуем второй вариант
-                public_link = y.get_public_url(disk_file_path)
-            except AttributeError:
-                # Если оба не работают, формируем ссылку вручную
-                # Получаем информацию о файле
-                file_info = y.get_meta(disk_file_path)
-                if hasattr(file_info, 'public_url'):
-                    public_link = file_info.public_url
-                else:
-                    # Последний вариант - берем из атрибутов
-                    public_link = f"https://disk.yandex.ru/d/{file_info.public_key}"
+            # Делаем запрос к API
+            response = requests.get(api_url, params=params, timeout=10)
+            response.raise_for_status()  # Проверяем на ошибки HTTP
 
-        print(f"🔗 Публичная ссылка: {public_link}")
+            download_data = response.json()
 
-        return public_link
+            # Извлекаем прямую ссылку на скачивание
+            if 'href' in download_data:
+                direct_download_url = download_data['href']
+                print(f"✅ Прямая ссылка на скачивание получена через API")
+                print(f"🔗 {direct_download_url[:100]}...")
+
+                # Возвращаем прямую ссылку
+                return direct_download_url
+            else:
+                raise Exception("В ответе API нет поля 'href'")
+
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Ошибка при запросе к API Яндекс.Диска: {e}")
+
+            # Запасной вариант - формируем ссылку на предпросмотр (может работать не всегда)
+            if 'public_key' in locals() or 'public_key' in dir():
+                fallback_url = f"https://downloader.disk.yandex.ru/preview/{public_key}?size=2048x2048"
+                print(f"⚠️ Использую запасную ссылку: {fallback_url}")
+                return fallback_url
+            else:
+                raise HTTPException(status_code=500, detail="Не удалось получить ссылку на файл")
 
     except yadisk.exceptions.PathNotFoundError:
         print("❌ Путь не найден")
