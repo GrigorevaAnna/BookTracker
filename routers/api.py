@@ -376,7 +376,7 @@ async def add_to_wishlist(
     return {
         "message": f"Книга '{title}' добавлена в вишлист (Хочу)",
         "book_id": created_book_id,
-        "status": "WANT",
+        "status": "WANTS",
         "in_wishlist": True
     }
 
@@ -1397,7 +1397,7 @@ async def move_from_wishlist_to_library(
     return {
         "message": f"Книга '{book.Название}' перенесена из вишлиста в библиотеку",
         "book_id": book_id,
-        "old_status": "WANT",
+        "old_status": "WANTS",
         "new_status": "WANT_TO_READ"
     }
 
