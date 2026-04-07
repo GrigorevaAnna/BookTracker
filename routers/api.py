@@ -1289,3 +1289,28 @@ async def add_book_from_external(
         "book_id": created_book_id,
         "source": "google_books"
     }
+
+
+from services.book_search import book_search_service
+
+
+@router.get("/search/book/isbn/{isbn}")
+async def search_book_isbn(isbn: str):
+    """Поиск книги по ISBN (OpenLibrary + Google Books)"""
+    result = await book_search_service.search_by_isbn(isbn)
+
+    if result:
+        return {"found": True, "book": result}
+    else:
+        return {"found": False, "message": "Книга не найдена"}
+
+
+@router.get("/search/book/title")
+async def search_book_title(title: str):
+    """Поиск книг по названию (OpenLibrary + Google Books)"""
+    results = await book_search_service.search_by_title(title)
+
+    return {
+        "found": len(results),
+        "books": results
+    }
