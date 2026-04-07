@@ -939,6 +939,7 @@ async def add_book_to_user(
         description: Optional[str] = None,
         genre: Optional[str] = None,
         pages: Optional[int] = None,
+        isbn: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
         db: Session = Depends(get_db)
 ):
@@ -1096,187 +1097,68 @@ async def add_book_to_user(
 
 
 # ============================================
-# ПОИСК КНИГ ЧЕРЕЗ ВНЕШНИЕ API
+# КОМБИНИРОВАННЫЙ ПОИСК КНИГ
 # ============================================
 
-from services.openlibrary import openlibrary_service
+from services.book_search import combined_search
 
 
-@router.get("/search/external/isbn/{isbn}")
-async def search_book_by_isbn(isbn: str):
-    """
-    Поиск книги по ISBN через OpenLibrary API
-    """
-    result = await openlibrary_service.search_by_isbn(isbn)
-
-    if result:
-        return {
-            "found": True,
-            "book": result
-        }
-    else:
-        return {
-            "found": False,
-            "message": "Книга не найдена в OpenLibrary"
-        }
-
-
-@router.get("/search/external/title")
-async def search_books_by_title(title: str, limit: int = 10):
-    """
-    Поиск книг по названию через OpenLibrary API
-    """
-    results = await openlibrary_service.search_by_title(title, limit)
-
-    return {
-        "found": len(results),
-        "books": results
-    }
-
-
-@router.post("/user/{user_id}/add-book-from-external")
-async def add_book_from_external(
-        user_id: str,
-        book_data: dict,
-        add_to_wishlist: bool = False,
+@router.get("/search/combined")
+async def combined_book_search(
+        query: str,
         db: Session = Depends(get_db)
 ):
     """
-    Добавить книгу из внешнего источника (OpenLibrary)
+    Комбинированный поиск книг из всех источников:
+    - Google Books
+    - OpenLibrary
+    - Apple iTunes
+    - Локальная база данных
     """
-    import uuid
-    from datetime import datetime
-    from models.sql_models import Книги, Произведения, Содержание, Труд, Авторы, Сессия_статус, Вишлист
+    if not query or len(query) < 2:
+        return {"found": 0, "books": [], "message": "Запрос слишком короткий"}
 
-    # Проверяем пользователя
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # Проверяем, есть ли уже такая книга в БД по ISBN
-    existing_book = None
-    if book_data.get("isbn"):
-        existing_book = db.query(Книги).filter(Книги.ISBN == book_data["isbn"]).first()
-
-    # Если нет — создаём новую
-    if not existing_book:
-        book_id = str(uuid.uuid4())[:8]
-        work_id = str(uuid.uuid4())[:8]
-
-        # Создаём произведение
-        new_work = Произведения(
-            id_произведения=work_id,
-            Название=book_data.get("title", ""),
-            Описание=book_data.get("description", ""),
-            Количество_страниц=book_data.get("pages", 0)
-        )
-        db.add(new_work)
-
-        # Создаём книгу
-        new_book = Книги(
-            id_книги=book_id,
-            Название=book_data.get("title", ""),
-            Автор=book_data.get("author", ""),
-            Количество_страниц=book_data.get("pages", 0),
-            Описание=book_data.get("description", ""),
-            ISBN=book_data.get("isbn", ""),
-            год_издания=book_data.get("published_date", ""),
-            издательство=book_data.get("publisher", ""),
-            Фото_обложки=book_data.get("cover_url", "")
-        )
-        db.add(new_book)
-
-        # Связываем
-        content = Содержание(
-            id_книги=book_id,
-            id_произведения=work_id,
-            порядок_в_книге=1
-        )
-        db.add(content)
-
-        # Создаём автора
-        name_parts = book_data.get("author", "").split()
-        if name_parts:
-            author_id = str(uuid.uuid4())[:8]
-            new_author = Авторы(
-                id_автора=author_id,
-                Имя=name_parts[0] if len(name_parts) > 0 else book_data.get("author", ""),
-                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
-                Отчество=""
-            )
-            db.add(new_author)
-
-            труд = Труд(
-                id_автора=author_id,
-                id_произведения=work_id,
-                роль="автор"
-            )
-            db.add(труд)
-
-        db.flush()
-        created_book_id = book_id
-        created_work_id = work_id
-
-        # Если есть обложка — скачиваем и сохраняем
-        if book_data.get("cover_url"):
-            try:
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(book_data["cover_url"])
-                    if response.status_code == 200:
-                        new_book.Фото_данные = response.content
-                        new_book.Фото_тип = "image/jpeg"
-            except Exception as e:
-                print(f"Ошибка при загрузке обложки: {e}")
-
-        db.commit()
-    else:
-        created_book_id = existing_book.id_книги
-        content = db.query(Содержание).filter(
-            Содержание.id_книги == existing_book.id_книги
-        ).first()
-        created_work_id = content.id_произведения if content else None
-
-    # Добавляем статус пользователю
-    existing_status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == created_work_id
-        )
-    ).first()
-
-    if not existing_status:
-        new_status = Сессия_статус(
-            id_пользователя=user_id,
-            id_произведения=created_work_id,
-            Статус="Хочу прочитать",
-            current_page=0,
-            added_date=datetime.now().isoformat()
-        )
-        db.add(new_status)
-
-    # Вишлист
-    if add_to_wishlist:
-        existing_wishlist = db.query(Вишлист).filter(
-            and_(
-                Вишлист.id_пользователя == user_id,
-                Вишлист.id_книги == created_book_id
-            )
-        ).first()
-
-        if not existing_wishlist:
-            wishlist_item = Вишлист(
-                id_пользователя=user_id,
-                id_книги=created_book_id,
-                дата_добавления=datetime.now().isoformat(),
-                приоритет=1
-            )
-            db.add(wishlist_item)
-
-    db.commit()
+    results = await combined_search.search_all(query, db)
 
     return {
-        "message": f"Книга '{book_data.get('title')}' добавлена",
-        "book_id": created_book_id,
-        "source": "openlibrary"
+        "found": len(results),
+        "query": query,
+        "books": results,
+        "sources": ["Google Books", "OpenLibrary", "Apple iTunes", "Локальная база"]
     }
+
+
+@router.get("/search/combined/isbn/{isbn}")
+async def combined_search_by_isbn(
+        isbn: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Поиск книги по ISBN во всех источниках
+    """
+    # Сначала ищем в локальной БД
+    from models.sql_models import Книги
+
+    local_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+    if local_book:
+        return {
+            "found": True,
+            "book": {
+                "title": local_book.Название,
+                "author": local_book.Автор,
+                "description": local_book.Описание,
+                "pages": local_book.Количество_страниц,
+                "isbn": local_book.ISBN,
+                "source": "Локальная база",
+                "local_id": local_book.id_книги
+            }
+        }
+
+    # Ищем во внешних API
+    results = await combined_search.search_all(isbn)
+
+    if results:
+        return {"found": True, "book": results[0]}
+    else:
+        return {"found": False, "message": "Книга не найдена ни в одном источнике"}
+
