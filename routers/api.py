@@ -1161,3 +1161,72 @@ async def combined_search_by_isbn(
     else:
         return {"found": False, "message": "Книга не найдена ни в одном источнике"}
 
+
+@router.delete("/user/{user_id}/book/{book_id}")
+async def remove_book_from_user(
+        user_id: str,
+        book_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Удаляет книгу из библиотеки пользователя.
+    - Удаляется запись из Сессия_статус (связь пользователь-книга)
+    - Если книга была в вишлисте, удаляется и оттуда
+    - Сама книга из каталога НЕ удаляется (может быть у других пользователей)
+    """
+    from models.sql_models import Сессия_статус, Вишлист
+
+    # 1. Проверяем существование пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # 2. Проверяем существование книги
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    # 3. Получаем произведение для этой книги
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
+
+    # 4. Ищем связь пользователя с книгой
+    user_book = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not user_book:
+        raise HTTPException(
+            status_code=404,
+            detail="Книга не найдена в библиотеке пользователя"
+        )
+
+    # 5. Запоминаем статус для ответа
+    old_status = user_book.Статус
+
+    # 6. Удаляем связь пользователя с книгой
+    db.delete(user_book)
+
+    # 7. Если книга была в вишлисте — удаляем оттуда
+    wishlist_item = db.query(Вишлист).filter(
+        and_(
+            Вишлист.id_пользователя == user_id,
+            Вишлист.id_книги == book_id
+        )
+    ).first()
+
+    if wishlist_item:
+        db.delete(wishlist_item)
+
+    db.commit()
+
+    return {
+        "message": f"Книга '{book.Название}' удалена из библиотеки",
+        "book_id": book_id,
+        "book_title": book.Название,
+        "old_status": old_status
+    }
