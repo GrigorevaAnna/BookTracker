@@ -4,14 +4,17 @@ from enum import Enum
 from datetime import datetime, date
 
 class BookStatus(str, Enum):
-    WANT_TO_READ = "WANT_TO_READ"      # Английские для API, в БД русские
-    READING = "READING"
-    FINISHED = "FINISHED"
-    PAUSED = "PAUSED"
+    WANT_TO_BUY = "WANT_TO_BUY"        # 👈 НОВЫЙ СТАТУС для вишлиста
+    WANT_TO_READ = "WANT_TO_READ"      # Хочу прочитать (библиотека)
+    READING = "READING"                # Читаю
+    FINISHED = "FINISHED"              # Прочитано
+    PAUSED = "PAUSED"                  # Приостановлено
+
 
 # Преобразование статусов API -> БД
 def status_to_db(status: BookStatus) -> str:
     mapping = {
+        BookStatus.WANT_TO_BUY: "Хочу купить",        # 👈 НОВЫЙ
         BookStatus.WANT_TO_READ: "Хочу прочитать",
         BookStatus.READING: "Читаю",
         BookStatus.FINISHED: "Прочитано",
@@ -19,16 +22,17 @@ def status_to_db(status: BookStatus) -> str:
     }
     return mapping[status]
 
+
 # Преобразование статусов БД -> API
 def status_from_db(db_status: str) -> BookStatus:
     mapping = {
+        "Хочу купить": BookStatus.WANT_TO_BUY,        # 👈 НОВЫЙ
         "Хочу прочитать": BookStatus.WANT_TO_READ,
         "Читаю": BookStatus.READING,
         "Прочитано": BookStatus.FINISHED,
         "Приостановлено": BookStatus.PAUSED
     }
     return mapping.get(db_status, BookStatus.WANT_TO_READ)
-
 # ---------- Модели для таблиц ----------
 
 class ТипыКнигиBase(BaseModel):
