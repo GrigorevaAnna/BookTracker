@@ -1,4 +1,3 @@
-# services/openlibrary.py
 import httpx
 from typing import Optional, Dict, Any, List
 
@@ -56,12 +55,10 @@ class OpenLibraryService:
 
     def _parse_book_data(self, data: Dict[str, Any], isbn: str) -> Dict[str, Any]:
         """Парсинг данных книги из ответа OpenLibrary"""
-        # Извлекаем авторов
         authors = data.get("authors", [])
         author_names = [a.get("name", "") for a in authors if a.get("name")]
         author_str = ", ".join(author_names) if author_names else "Неизвестный автор"
 
-        # Извлекаем обложку
         cover = data.get("cover", {})
         cover_url = cover.get("large", cover.get("medium", cover.get("small", "")))
 
@@ -79,11 +76,9 @@ class OpenLibraryService:
 
     def _parse_search_result(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         """Парсинг результата поиска"""
-        # Берём первый ISBN если есть
         isbns = doc.get("isbn", [])
         isbn = isbns[0] if isbns else ""
 
-        # Формируем URL обложки
         cover_id = doc.get("cover_i", "")
         cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else ""
 
@@ -92,7 +87,7 @@ class OpenLibraryService:
             "author": ", ".join(doc.get("author_name", [])),
             "description": "",
             "pages": doc.get("number_of_pages_median", 0),
-            "published_date": doc.get("first_publish_year", ""),
+            "published_date": str(doc.get("first_publish_year", "")),
             "publisher": doc.get("publisher", [""])[0] if doc.get("publisher") else "",
             "isbn": isbn,
             "cover_url": cover_url,

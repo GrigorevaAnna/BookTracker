@@ -1100,14 +1100,15 @@ async def add_book_to_user(
 # ПОИСК КНИГ ЧЕРЕЗ ВНЕШНИЕ API
 # ============================================
 
+from services.openlibrary import openlibrary_service
 
 
 @router.get("/search/external/isbn/{isbn}")
 async def search_book_by_isbn(isbn: str):
     """
-    Поиск книги по ISBN через Google Books API
+    Поиск книги по ISBN через OpenLibrary API
     """
-    result = await google_books_service.search_by_isbn(isbn)
+    result = await openlibrary_service.search_by_isbn(isbn)
 
     if result:
         return {
@@ -1117,35 +1118,16 @@ async def search_book_by_isbn(isbn: str):
     else:
         return {
             "found": False,
-            "message": "Книга не найдена в Google Books"
+            "message": "Книга не найдена в OpenLibrary"
         }
 
 
-@router.get("/search/external/title-author")
-async def search_books_by_title_author(
-        title: str,
-        author: Optional[str] = None
-):
+@router.get("/search/external/title")
+async def search_books_by_title(title: str, limit: int = 10):
     """
-    Поиск книг по названию и автору через Google Books API
+    Поиск книг по названию через OpenLibrary API
     """
-    results = await google_books_service.search_by_title_author(title, author)
-
-    return {
-        "found": len(results),
-        "books": results
-    }
-
-
-@router.get("/search/external/query")
-async def search_books_external(
-        query: str,
-        max_results: int = 20
-):
-    """
-    Общий поиск книг через Google Books API
-    """
-    results = await google_books_service.search_by_query(query, max_results)
+    results = await openlibrary_service.search_by_title(title, limit)
 
     return {
         "found": len(results),
@@ -1156,13 +1138,22 @@ async def search_books_external(
 @router.post("/user/{user_id}/add-book-from-external")
 async def add_book_from_external(
         user_id: str,
-        book_data: dict,  # Данные из внешнего API
+        book_data: dict,
         add_to_wishlist: bool = False,
         db: Session = Depends(get_db)
 ):
     """
-    Добавить книгу из внешнего источника (Google Books)
+    Добавить книгу из внешнего источника (OpenLibrary)
     """
+    import uuid
+    from datetime import datetime
+    from models.sql_models import Книги, Произведения, Содержание, Труд, Авторы, Сессия_статус, Вишлист
+
+    # Проверяем пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
     # Проверяем, есть ли уже такая книга в БД по ISBN
     existing_book = None
     if book_data.get("isbn"):
@@ -1204,7 +1195,7 @@ async def add_book_from_external(
         )
         db.add(content)
 
-        # Создаём автора (упрощённо)
+        # Создаём автора
         name_parts = book_data.get("author", "").split()
         if name_parts:
             author_id = str(uuid.uuid4())[:8]
@@ -1230,6 +1221,7 @@ async def add_book_from_external(
         # Если есть обложка — скачиваем и сохраняем
         if book_data.get("cover_url"):
             try:
+                import httpx
                 async with httpx.AsyncClient() as client:
                     response = await client.get(book_data["cover_url"])
                     if response.status_code == 200:
@@ -1287,30 +1279,5 @@ async def add_book_from_external(
     return {
         "message": f"Книга '{book_data.get('title')}' добавлена",
         "book_id": created_book_id,
-        "source": "google_books"
-    }
-
-
-from services.book_search import book_search_service
-
-
-@router.get("/search/book/isbn/{isbn}")
-async def search_book_isbn(isbn: str):
-    """Поиск книги по ISBN (OpenLibrary + Google Books)"""
-    result = await book_search_service.search_by_isbn(isbn)
-
-    if result:
-        return {"found": True, "book": result}
-    else:
-        return {"found": False, "message": "Книга не найдена"}
-
-
-@router.get("/search/book/title")
-async def search_book_title(title: str):
-    """Поиск книг по названию (OpenLibrary + Google Books)"""
-    results = await book_search_service.search_by_title(title)
-
-    return {
-        "found": len(results),
-        "books": results
+        "source": "openlibrary"
     }
