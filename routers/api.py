@@ -374,9 +374,9 @@ async def add_to_wishlist(
     db.commit()
 
     return {
-        "message": f"Книга '{title}' добавлена в вишлист (Хочу купить)",
+        "message": f"Книга '{title}' добавлена в вишлист (Хочу)",
         "book_id": created_book_id,
-        "status": "WANT_TO_BUY",
+        "status": "WANT",
         "in_wishlist": True
     }
 
@@ -1397,6 +1397,7 @@ async def move_from_wishlist_to_library(
     return {
         "message": f"Книга '{book.Название}' перенесена из вишлиста в библиотеку",
         "book_id": book_id,
+        "old_status": "WANT",
         "new_status": "WANT_TO_READ"
     }
 

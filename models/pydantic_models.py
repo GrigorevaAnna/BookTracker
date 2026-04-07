@@ -4,7 +4,7 @@ from enum import Enum
 from datetime import datetime, date
 
 class BookStatus(str, Enum):
-    WANT_TO_BUY = "WANT_TO_BUY"        # 👈 НОВЫЙ СТАТУС для вишлиста
+    WANT = "WANT"                      # 👈 Хочу купить (вишлист)
     WANT_TO_READ = "WANT_TO_READ"      # Хочу прочитать (библиотека)
     READING = "READING"                # Читаю
     FINISHED = "FINISHED"              # Прочитано
@@ -14,7 +14,7 @@ class BookStatus(str, Enum):
 # Преобразование статусов API -> БД
 def status_to_db(status: BookStatus) -> str:
     mapping = {
-        BookStatus.WANT_TO_BUY: "Хочу купить",        # 👈 НОВЫЙ
+        BookStatus.WANT: "Хочу",              # 👈 WANT
         BookStatus.WANT_TO_READ: "Хочу прочитать",
         BookStatus.READING: "Читаю",
         BookStatus.FINISHED: "Прочитано",
@@ -26,7 +26,7 @@ def status_to_db(status: BookStatus) -> str:
 # Преобразование статусов БД -> API
 def status_from_db(db_status: str) -> BookStatus:
     mapping = {
-        "Хочу купить": BookStatus.WANT_TO_BUY,        # 👈 НОВЫЙ
+        "Хочу": BookStatus.WANT,              # 👈 WANT
         "Хочу прочитать": BookStatus.WANT_TO_READ,
         "Читаю": BookStatus.READING,
         "Прочитано": BookStatus.FINISHED,
