@@ -8,3 +8,4 @@ asyncpg  # для асинхронной работы
 yadisk
 requests
 python-multipart
+httpx
