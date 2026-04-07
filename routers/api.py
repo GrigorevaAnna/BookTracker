@@ -935,36 +935,43 @@ async def add_book_to_user(
         user_id: str,
         title: str,
         author: str,
-        add_to_wishlist: bool = False,
         description: Optional[str] = None,
         genre: Optional[str] = None,
         pages: Optional[int] = None,
         isbn: Optional[str] = None,
+        cover_url: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
         db: Session = Depends(get_db)
 ):
     """
     Добавляет книгу пользователю.
+    - Если книга уже есть у пользователя → ошибка 409
     - Если книги нет в БД → создаёт новую
-    - Если книга уже есть в БД → просто связывает с пользователем
-    - Если передан cover_file → сохраняет обложку сразу в БД
-    - add_to_wishlist = True → добавляет в вишлист
-    - add_to_wishlist = False → просто в библиотеку (статус Хочу прочитать)
+    - Если книга есть в БД, но нет у пользователя → связывает с пользователем
+    - Статус всегда "Хочу прочитать" → книга автоматически попадает в вишлист
     """
+    import uuid
+    from datetime import datetime
+
     # 1. Проверяем существование пользователя
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    # 2. Ищем книгу в БД по названию и автору
-    existing_book = db.query(Книги).filter(
-        and_(
-            Книги.Название.ilike(title.strip()),
-            Книги.Автор.ilike(author.strip())
-        )
-    ).first()
+    # 2. Ищем книгу в БД по ISBN, названию и автору
+    existing_book = None
+    if isbn:
+        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
 
-    # 3. Если книги нет — создаём новую
+    if not existing_book:
+        existing_book = db.query(Книги).filter(
+            and_(
+                Книги.Название.ilike(title.strip()),
+                Книги.Автор.ilike(author.strip())
+            )
+        ).first()
+
+    # 3. Если книги нет в БД — создаём новую
     if not existing_book:
         book_id = str(uuid.uuid4())[:8]
         work_id = str(uuid.uuid4())[:8]
@@ -986,7 +993,8 @@ async def add_book_to_user(
             Количество_страниц=pages or 0,
             Описание=description or "",
             Жанр=genre or "",
-            ISBN=""
+            ISBN=isbn or "",
+            Фото_обложки=cover_url or ""
         )
         db.add(new_book)
 
@@ -999,23 +1007,23 @@ async def add_book_to_user(
         db.add(content)
 
         # Создаём автора (упрощённо)
-        author_id = str(uuid.uuid4())[:8]
         name_parts = author.strip().split()
-        new_author = Авторы(
-            id_автора=author_id,
-            Имя=name_parts[0] if len(name_parts) > 0 else author,
-            Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
-            Отчество=""
-        )
-        db.add(new_author)
+        if name_parts:
+            author_id = str(uuid.uuid4())[:8]
+            new_author = Авторы(
+                id_автора=author_id,
+                Имя=name_parts[0] if len(name_parts) > 0 else author,
+                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
+                Отчество=""
+            )
+            db.add(new_author)
 
-        # Связываем автора с произведением
-        труд = Труд(
-            id_автора=author_id,
-            id_произведения=work_id,
-            роль="автор"
-        )
-        db.add(труд)
+            труд = Труд(
+                id_автора=author_id,
+                id_произведения=work_id,
+                роль="автор"
+            )
+            db.add(труд)
 
         db.flush()
         created_book_id = book_id
@@ -1048,51 +1056,42 @@ async def add_book_to_user(
             existing_book.Фото_тип = cover_file.content_type
             db.commit()
 
-    # 4. Добавляем статус WANT_TO_READ для книги (всегда!)
-    existing_status = db.query(Сессия_статус).filter(
+    # 4. ПРОВЕРКА: есть ли уже эта книга у пользователя?
+    existing_user_book = db.query(Сессия_статус).filter(
         and_(
             Сессия_статус.id_пользователя == user_id,
             Сессия_статус.id_произведения == created_work_id
         )
     ).first()
 
-    if not existing_status:
-        new_status = Сессия_статус(
-            id_пользователя=user_id,
-            id_произведения=created_work_id,
-            Статус="Хочу прочитать",
-            current_page=0,
-            added_date=datetime.now().isoformat()
+    if existing_user_book:
+        # Книга уже есть в библиотеке пользователя
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "BOOK_ALREADY_EXISTS",
+                "message": f"Книга '{title}' уже есть в вашей библиотеке",
+                "book_id": created_book_id,
+                "current_status": existing_user_book.Статус
+            }
         )
-        db.add(new_status)
-        db.commit()
 
-    # 5. Если add_to_wishlist = True — добавляем в отдельную таблицу вишлиста
-    if add_to_wishlist:
-        existing_wishlist = db.query(Вишлист).filter(
-            and_(
-                Вишлист.id_пользователя == user_id,
-                Вишлист.id_книги == created_book_id
-            )
-        ).first()
+    # 5. Добавляем статус "Хочу прочитать" (это автоматически означает вишлист)
+    new_status = Сессия_статус(
+        id_пользователя=user_id,
+        id_произведения=created_work_id,
+        Статус="Хочу прочитать",
+        current_page=0,
+        added_date=datetime.now().isoformat()
+    )
+    db.add(new_status)
+    db.commit()
 
-        if not existing_wishlist:
-            wishlist_item = Вишлист(
-                id_пользователя=user_id,
-                id_книги=created_book_id,
-                дата_добавления=datetime.now().isoformat(),
-                приоритет=1
-            )
-            db.add(wishlist_item)
-            db.commit()
-
-    # 6. Формируем ответ
     return {
-        "message": f"Книга '{title}' добавлена в {'вишлист' if add_to_wishlist else 'библиотеку'} (статус: Хочу прочитать)",
+        "message": f"Книга '{title}' добавлена в библиотеку (статус: Хочу прочитать)",
         "book_id": created_book_id,
         "status": "WANT_TO_READ",
-        "in_wishlist": add_to_wishlist,
-        "has_cover": cover_file is not None
+        "in_wishlist": True
     }
 
 
