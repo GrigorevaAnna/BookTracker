@@ -5,7 +5,6 @@ from typing import List, Optional
 from datetime import datetime
 import os
 import uuid
-from services.google_books import google_books_service
 import httpx
 
 from database.database import get_db
