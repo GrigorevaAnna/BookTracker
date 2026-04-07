@@ -202,7 +202,9 @@ class KotlinBook(BaseModel):
     id: str = ""
     title: str = ""
     author: str = ""
-    coverUrl: str = ""
+    coverUrl: str = ""  # Ссылка (опционально)
+    coverData: str = ""  # 👈 НОВОЕ: base64 строка для фронта
+    coverType: str = ""  # 👈 НОВОЕ: тип изображения
     description: str = ""
     pages: int = 0
     genre: str = ""
@@ -213,11 +215,20 @@ class KotlinBook(BaseModel):
     @classmethod
     def from_db_book(cls, book: КнигаBase, authors: List[str] = None):
         """Преобразование из БД модели в Kotlin модель"""
+        import base64
+
+        # Конвертируем бинарные данные в base64 для отправки
+        cover_data = ""
+        if hasattr(book, 'Фото_данные') and book.Фото_данные:
+            cover_data = base64.b64encode(book.Фото_данные).decode('utf-8')
+
         return cls(
             id=book.id_книги,
             title=book.Название,
             author=", ".join(authors) if authors else book.Автор,
             coverUrl=book.Фото_обложки or "",
+            coverData=cover_data,
+            coverType=book.Фото_тип or "",
             description=book.Описание or "",
             pages=book.Количество_страниц,
             genre=book.Жанр or "",

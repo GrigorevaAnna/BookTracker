@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, Float, Boolean, ForeignKey, TIMESTAMP, Text, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from sqlalchemy import Column, String, Integer, Float, Boolean, ForeignKey, TIMESTAMP, Text, BigInteger, LargeBinary
 
 Base = declarative_base()
 
@@ -102,7 +103,9 @@ class Книги(Base):
     Количество_страниц = Column(Integer, nullable=False)
     id_типа_книги = Column(String(50), ForeignKey('Типы_книги.id_типа'))
     Язык = Column(String(50), default='Русский')
-    Фото_обложки = Column(Text)
+    Фото_обложки = Column(Text)  # Ссылка на Яндекс.Диск (опционально)
+    Фото_данные = Column(LargeBinary)  # 👈 НОВОЕ: бинарные данные обложки
+    Фото_тип = Column(String(50))  # 👈 НОВОЕ: тип файла (image/jpeg и т.д.)
     Описание = Column(Text)
     Жанр = Column(String(100), default='')
     Штрих_код = Column(String(20))

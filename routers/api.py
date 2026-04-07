@@ -15,7 +15,8 @@ from models.pydantic_models import (
     ApiBookWithProgress, KotlinBook, KotlinUserBook, KotlinUser,
     BookStatus, status_from_db, status_to_db
 )
-from services.yandex_disk import upload_cover_to_yandex_disk
+
+from services.yandex_disk import upload_cover_to_yandex_disk_and_db
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -333,22 +334,31 @@ def search_books(query: str, db: Session = Depends(get_db)):
 
 @router.get("/books/{book_id}", response_model=KotlinBook)
 def get_book(book_id: str, db: Session = Depends(get_db)):
+    """Получить конкретную книгу по ID с обложкой из БД"""
     книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not книга:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
+    # Получаем авторов
     авторы = []
-    содержание = db.query(Содержание).filter(Содержание.id_книги == книга.id_книги).all()
+    содержание = db.query(Содержание).filter(
+        Содержание.id_книги == книга.id_книги
+    ).all()
+
     for с in содержание:
-        труд = db.query(Труд).filter(Труд.id_произведения == с.id_произведения).all()
+        труд = db.query(Труд).filter(
+            Труд.id_произведения == с.id_произведения
+        ).all()
         for t in труд:
-            автор = db.query(Авторы).filter(Авторы.id_автора == t.id_автора).first()
+            автор = db.query(Авторы).filter(
+                Авторы.id_автора == t.id_автора
+            ).first()
             if автор:
                 автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
                 авторы.append(автор_name)
 
+    # Конвертируем в Kotlin модель (включая base64 обложку)
     return KotlinBook.from_db_book(книга, авторы)
-
 
 # ============================================
 # ЗАГРУЗКА ОБЛОЖЕК
@@ -356,24 +366,37 @@ def get_book(book_id: str, db: Session = Depends(get_db)):
 
 @router.post("/books/{book_id}/upload-cover")
 async def upload_book_cover(
-    book_id: str,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+        book_id: str,
+        file: UploadFile = File(...),
+        db: Session = Depends(get_db)
 ):
+    """Загружает обложку в БД и на Яндекс.Диск"""
+
+    # Проверяем книгу
     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
+    # Проверяем формат
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
     file_extension = os.path.splitext(file.filename)[1].lower()
     if file_extension not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="Можно загружать только изображения (jpg, png, gif, webp)")
+        raise HTTPException(
+            status_code=400,
+            detail="Можно загружать только изображения (jpg, png, gif, webp)"
+        )
 
     try:
-        cover_url = await upload_cover_to_yandex_disk(file, book_id)
-        book.Фото_обложки = cover_url
-        db.commit()
-        return {"message": "Обложка успешно загружена", "cover_url": cover_url}
+        # Загружаем в БД и на Яндекс.Диск
+        result = await upload_cover_to_yandex_disk_and_db(file, book_id, db)
+
+        return {
+            "message": "Обложка успешно загружена и сохранена в базу данных",
+            "cover_url": result.get("cover_url"),
+            "cover_data": result.get("cover_data"),
+            "cover_type": result.get("cover_type")
+        }
+
     except Exception as e:
         print(f"Ошибка при загрузке обложки: {e}")
-        raise HTTPException(status_code=500, detail="Не удалось загрузить обложку")
+        raise HTTPException(status_code=500, detail=f"Не удалось загрузить обложку: {str(e)}")
