@@ -210,9 +210,74 @@ def get_user_books(
 
 
 @router.get("/user/{user_id}/wishlist", response_model=List[ApiBookWithProgress])
-def get_user_wishlist(user_id: str, db: Session = Depends(get_db)):
-    return get_user_books(user_id, BookStatus.WANT_TO_READ, db)
+def get_user_wishlist(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить вишлист (книги со статусом "Хочу купить")"""
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        return []
 
+    wishlist_items = db.query(Вишлист).filter(
+        Вишлист.id_пользователя == user_id
+    ).all()
+
+    result = []
+    for item in wishlist_items:
+        книга = db.query(Книги).filter(Книги.id_книги == item.id_книги).first()
+        if not книга:
+            continue
+
+        авторы_список = []
+        содержание = db.query(Содержание).filter(
+            Содержание.id_книги == книга.id_книги
+        ).all()
+        for с in содержание:
+            труд = db.query(Труд).filter(
+                Труд.id_произведения == с.id_произведения
+            ).all()
+            for t in труд:
+                автор = db.query(Авторы).filter(
+                    Авторы.id_автора == t.id_автора
+                ).first()
+                if автор:
+                    автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                    авторы_список.append(автор_name)
+
+        kotlin_book = KotlinBook(
+            id=книга.id_книги,
+            title=книга.Название,
+            author=", ".join(авторы_список) if авторы_список else книга.Автор,
+            coverUrl=книга.Фото_обложки or "",
+            description=книга.Описание or "",
+            pages=книга.Количество_страниц,
+            genre=книга.Жанр or "",
+            isbn=книга.ISBN or "",
+            publishedDate=книга.год_издания or "",
+            publisher=книга.издательство or ""
+        )
+
+        kotlin_user_book = KotlinUserBook(
+            userId=user_id,
+            bookId=книга.id_книги,
+            status=BookStatus.WANTS,
+            currentPage=0,
+            rating=0.0,
+            review="",
+            startDate="",
+            endDate="",
+            addedDate=item.дата_добавления or "",
+            readingTimeMinutes=0
+        )
+
+        result.append(ApiBookWithProgress(
+            book=kotlin_book,
+            userBook=kotlin_user_book,
+            progress=0.0
+        ))
+
+    return result
 
 @router.get("/user/{user_id}/reading", response_model=List[ApiBookWithProgress])
 def get_user_reading(user_id: str, db: Session = Depends(get_db)):
