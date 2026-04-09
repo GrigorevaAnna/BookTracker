@@ -14,7 +14,7 @@ class BookStatus(str, Enum):
 # Преобразование статусов API -> БД
 def status_to_db(status: BookStatus) -> str:
     mapping = {
-        BookStatus.WANTS: "Хочу",              # 👈 WANT
+        BookStatus.WANTS: "Хочу",
         BookStatus.WANT_TO_READ: "Хочу прочитать",
         BookStatus.READING: "Читаю",
         BookStatus.FINISHED: "Прочитано",
@@ -246,7 +246,7 @@ class KotlinUserBook(BaseModel):
     """Модель для отправки во фронтенд (соответствует Kotlin UserBook)"""
     userId: str = ""
     bookId: str = ""
-    status: BookStatus = BookStatus.WANT_TO_READ
+    status: BookStatus = BookStatus.WANTS
     currentPage: int = 0
     rating: float = 0.0
     review: str = ""

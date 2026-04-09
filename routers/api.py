@@ -23,6 +23,15 @@ from services.yandex_disk import upload_cover_to_yandex_disk_and_db
 router = APIRouter(prefix="/api", tags=["api"])
 
 
+
+
+
+
+
+
+
+
+
 # ============================================
 # ПОЛЬЗОВАТЕЛИ
 # ============================================
@@ -110,6 +119,14 @@ async def update_user_profile(
     db.commit()
 
     return {"message": "Профиль обновлён"}
+
+
+
+
+
+
+
+
 
 
 # ============================================
@@ -618,6 +635,14 @@ async def add_review(
     return {"message": "Отзыв добавлен", "rating": rating}
 
 
+
+
+
+
+
+
+
+
 # ============================================
 # КНИГИ (КАТАЛОГ)
 # ============================================
@@ -870,6 +895,14 @@ def get_book(book_id: str, db: Session = Depends(get_db)):
     return KotlinBook.from_db_book(книга, авторы)
 
 
+
+
+
+
+
+
+
+
 # ============================================
 # ЗАГРУЗКА ОБЛОЖЕК
 # ============================================
@@ -910,6 +943,13 @@ async def upload_book_cover(
     except Exception as e:
         print(f"Ошибка при загрузке обложки: {e}")
         raise HTTPException(status_code=500, detail=f"Не удалось загрузить обложку: {str(e)}")
+
+
+
+
+
+
+
 
 
 # ============================================
@@ -1019,6 +1059,13 @@ async def delete_quote(
     db.commit()
 
     return {"message": "Цитата удалена"}
+
+
+
+
+
+
+
 
 
 # ============================================
@@ -1188,6 +1235,14 @@ async def add_book_to_user(
         "status": "WANT_TO_READ",
         "in_wishlist": True
     }
+
+
+
+
+
+
+
+
 
 
 # ============================================
