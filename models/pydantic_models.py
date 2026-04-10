@@ -200,16 +200,19 @@ class ЦитатаСТэгами(BaseModel):
     цитата: ЦитатаBase
     тэги: List[ТэгBase] = []
 
+
+
+
+
+
+
 # ---------- Модели для соответствия Kotlin ----------
 
 class KotlinBook(BaseModel):
-    """Модель для отправки во фронтенд (соответствует Kotlin Book)"""
     id: str = ""
     title: str = ""
     author: str = ""
-    coverUrl: str = ""  # Ссылка (опционально)
-    coverData: str = ""  # 👈 НОВОЕ: base64 строка для фронта
-    coverType: str = ""  # 👈 НОВОЕ: тип изображения
+    coverUrl: str = ""  # 👈 теперь будет ссылка на /api/covers/{id}
     description: str = ""
     pages: int = 0
     genre: str = ""
@@ -218,28 +221,25 @@ class KotlinBook(BaseModel):
     publisher: str = ""
 
     @classmethod
-    def from_db_book(cls, book: КнигаBase, authors: List[str] = None):
-        """Преобразование из БД модели в Kotlin модель"""
-        import base64
-
-        # Конвертируем бинарные данные в base64 для отправки
-        cover_data = ""
+    def from_db_book(cls, book, authors: List[str] = None):
+        # Формируем URL для доступа к обложке через API
+        cover_url = ""
         if hasattr(book, 'Фото_данные') and book.Фото_данные:
-            cover_data = base64.b64encode(book.Фото_данные).decode('utf-8')
+            cover_url = f"/api/covers/{book.id_книги}"
+        elif hasattr(book, 'Фото_обложки') and book.Фото_обложки:
+            cover_url = book.Фото_обложки
 
         return cls(
             id=book.id_книги,
             title=book.Название,
-            author=", ".join(authors) if authors else book.Автор,
-            coverUrl=book.Фото_обложки or "",
-            coverData=cover_data,
-            coverType=book.Фото_тип or "",
-            description=book.Описание or "",
-            pages=book.Количество_страниц,
-            genre=book.Жанр or "",
-            isbn=book.ISBN or "",
-            publishedDate=book.год_издания or "",
-            publisher=book.издательство or ""
+            author=", ".join(authors) if authors else getattr(book, 'Автор', ''),
+            coverUrl=cover_url,  # 👈 теперь прямая ссылка на API
+            description=getattr(book, 'Описание', '') or "",
+            pages=getattr(book, 'Количество_страниц', 0),
+            genre=getattr(book, 'Жанр', '') or "",
+            isbn=getattr(book, 'ISBN', '') or "",
+            publishedDate=getattr(book, 'год_издания', '') or "",
+            publisher=getattr(book, 'издательство', '') or ""
         )
 
 class KotlinUserBook(BaseModel):

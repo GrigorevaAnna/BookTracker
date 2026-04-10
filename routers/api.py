@@ -1721,3 +1721,19 @@ async def add_to_library(
         "status": "WANT_TO_READ",
         "in_library": True
     }
+
+
+from fastapi.responses import Response
+
+
+@router.get("/covers/{book_id}")
+def get_cover(book_id: str, db: Session = Depends(get_db)):
+    """Отдаёт обложку книги как изображение"""
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book or not book.Фото_данные:
+        raise HTTPException(status_code=404, detail="Обложка не найдена")
+
+    return Response(
+        content=book.Фото_данные,
+        media_type=book.Фото_тип or "image/jpeg"
+    )
