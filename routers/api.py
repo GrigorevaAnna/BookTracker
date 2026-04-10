@@ -629,10 +629,41 @@ async def add_reading_session(
         start_page: int,
         end_page: int,
         duration_minutes: int,
+        quote_text: Optional[str] = None,  # 👈 можно сразу добавить цитату
+        quote_page: Optional[int] = None,  # 👈 страница цитаты
         db: Session = Depends(get_db)
 ):
-    """Добавить сессию чтения (для статистики)"""
+    """
+    Добавляет сессию чтения.
+    - Автоматически обновляет текущую страницу в статусе
+    - Если передан quote_text — сразу добавляет цитату
+    """
+    import uuid
+    from datetime import datetime
+
+    # 1. Получаем книгу и произведение
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    # 2. Получаем текущий статус пользователя
+    status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not status:
+        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
+
+    # 3. Сохраняем сессию
     session_id = str(uuid.uuid4())[:8]
+    pages_read = end_page - start_page
 
     new_session = Сессии(
         id_сессии=session_id,
@@ -640,27 +671,54 @@ async def add_reading_session(
         id_книги=book_id,
         Начальная_страница=start_page,
         Последняя_страница=end_page,
-        pages_read=end_page - start_page,
+        pages_read=pages_read,
         duration_minutes=duration_minutes,
         Дата_начала=datetime.now().isoformat()
     )
     db.add(new_session)
+
+    # 4. ОБНОВЛЯЕМ ПРОГРЕСС (текущую страницу)
+    status.current_page = end_page
+    status.reading_time_minutes = (status.reading_time_minutes or 0) + duration_minutes
+    status.updated_at = datetime.now()
+
+    # 5. Если дошли до конца книги
+    if end_page >= book.Количество_страниц:
+        status.Статус = "Прочитано"
+        status.end_date = datetime.now().isoformat()
+
+    # 6. Если передана цитата — добавляем её
+    quote_id = None
+    if quote_text:
+        quote_id = str(uuid.uuid4())[:8]
+        new_quote = Цитаты(
+            id_цитаты=quote_id,
+            id_пользователя=user_id,
+            id_произведения=content.id_произведения,
+            Текст=quote_text,
+            Страница=quote_page or end_page,
+            Дата=datetime.now().isoformat()
+        )
+        db.add(new_quote)
+
     db.commit()
 
-    # Обновляем общее время чтения в статусе
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if content:
-        status = db.query(Сессия_статус).filter(
-            and_(
-                Сессия_статус.id_пользователя == user_id,
-                Сессия_статус.id_произведения == content.id_произведения
-            )
-        ).first()
-        if status:
-            status.reading_time_minutes += duration_minutes
-            db.commit()
+    # Вычисляем процент
+    progress = round(end_page / book.Количество_страниц, 3) if book.Количество_страниц > 0 else 0
 
-    return {"message": "Сессия чтения добавлена", "session_id": session_id}
+    return {
+        "message": "Сессия чтения добавлена",
+        "session_id": session_id,
+        "pages_read": pages_read,
+        "duration_minutes": duration_minutes,
+        "current_page": end_page,
+        "progress": progress,
+        "status": status.Статус,
+        "quote_added": quote_id is not None,
+        "quote_id": quote_id
+    }
+
+
 
 
 @router.put("/user/{user_id}/book/{book_id}/review")
