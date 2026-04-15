@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
 from typing import List, Optional
@@ -6,6 +7,8 @@ from datetime import datetime
 import os
 import uuid
 import httpx
+
+from services.book_search import combined_search
 
 from database.database import get_db
 from models.sql_models import (
@@ -23,20 +26,11 @@ from services.yandex_disk import upload_cover_to_yandex_disk_and_db
 router = APIRouter(prefix="/api", tags=["api"])
 
 
-
-
-
-
-
-
-
-
-
 # ============================================
 # ПОЛЬЗОВАТЕЛИ
 # ============================================
 
-@router.get("/users/{user_id}", response_model=KotlinUser)
+@router.get("/users/{user_id}", response_model=KotlinUser, tags=["Пользователи"])
 def get_user(
         user_id: str,
         db: Session = Depends(get_db)
@@ -48,7 +42,7 @@ def get_user(
     return KotlinUser.from_db_user(user)
 
 
-@router.post("/users/register")
+@router.post("/users/register", tags=["Пользователи"])
 async def register_user(
         nickname: str,
         email: str,
@@ -56,23 +50,20 @@ async def register_user(
         db: Session = Depends(get_db)
 ):
     """Регистрация нового пользователя"""
-    # Проверяем, не занят ли email
     existing = db.query(Аккаунты).filter(Аккаунты.Почта == email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email уже зарегистрирован")
 
-    # Проверяем никнейм
     existing_nick = db.query(Аккаунты).filter(Аккаунты.Никнейм == nickname).first()
     if existing_nick:
         raise HTTPException(status_code=400, detail="Никнейм уже занят")
 
-    # Создаём пользователя
     user_id = str(uuid.uuid4())[:8]
     new_user = Аккаунты(
         id_пользователя=user_id,
         Никнейм=nickname,
         Почта=email,
-        Пароль=password,  # В реальном проекте хэшируйте!
+        Пароль=password,
         Дата_регистрации=datetime.now().isoformat(),
         reading_goal=12,
         pages_per_day_goal=50
@@ -88,7 +79,7 @@ async def register_user(
     }
 
 
-@router.put("/users/{user_id}/profile")
+@router.put("/users/{user_id}/profile", tags=["Пользователи"])
 async def update_user_profile(
         user_id: str,
         nickname: Optional[str] = None,
@@ -121,19 +112,11 @@ async def update_user_profile(
     return {"message": "Профиль обновлён"}
 
 
-
-
-
-
-
-
-
-
 # ============================================
-# КНИГИ ПОЛЬЗОВАТЕЛЯ
+# БИБЛИОТЕКА
 # ============================================
 
-@router.get("/user/{user_id}/books", response_model=List[ApiBookWithProgress])
+@router.get("/user/{user_id}/books", response_model=List[ApiBookWithProgress], tags=["Библиотека"])
 def get_user_books(
         user_id: str,
         status: Optional[BookStatus] = None,
@@ -168,7 +151,6 @@ def get_user_books(
         if not книга:
             continue
 
-        # Авторы
         авторы_список = []
         труд = db.query(Труд).filter(Труд.id_произведения == произведение.id_произведения).all()
         for t in труд:
@@ -209,12 +191,594 @@ def get_user_books(
     return result
 
 
-@router.get("/user/{user_id}/wishlist", response_model=List[ApiBookWithProgress])
+@router.get("/user/{user_id}/reading", response_model=List[ApiBookWithProgress], tags=["Библиотека"])
+def get_user_reading(user_id: str, db: Session = Depends(get_db)):
+    return get_user_books(user_id, BookStatus.READING, db)
+
+
+@router.get("/user/{user_id}/finished", response_model=List[ApiBookWithProgress], tags=["Библиотека"])
+def get_user_finished(user_id: str, db: Session = Depends(get_db)):
+    return get_user_books(user_id, BookStatus.FINISHED, db)
+
+
+@router.get("/user/{user_id}/stats", tags=["Библиотека"])
+def get_user_stats(user_id: str, db: Session = Depends(get_db)):
+    """Получить статистику чтения пользователя"""
+    status_counts = db.query(
+        Сессия_статус.Статус, db.func.count().label('count')
+    ).filter(Сессия_статус.id_пользователя == user_id).group_by(Сессия_статус.Статус).all()
+
+    total_time = db.query(db.func.sum(Сессия_статус.reading_time_minutes)).filter(
+        Сессия_статус.id_пользователя == user_id
+    ).scalar() or 0
+
+    total_pages = db.query(db.func.sum(Сессия_статус.current_page)).filter(
+        Сессия_статус.id_пользователя == user_id,
+        Сессия_статус.Статус == 'Прочитано'
+    ).scalar() or 0
+
+    avg_rating = db.query(db.func.avg(Сессия_статус.Рейтинг)).filter(
+        Сессия_статус.id_пользователя == user_id,
+        Сессия_статус.Рейтинг > 0
+    ).scalar() or 0
+
+    stats = {
+        "wishlist": 0, "reading": 0, "finished": 0, "paused": 0,
+        "total_reading_time_minutes": total_time,
+        "total_pages_read": total_pages,
+        "average_rating": round(float(avg_rating), 1)
+    }
+
+    for status_row in status_counts:
+        db_status, count = status_row
+        if db_status == "Хочу прочитать":
+            stats["wishlist"] = count
+        elif db_status == "Читаю":
+            stats["reading"] = count
+        elif db_status == "Прочитано":
+            stats["finished"] = count
+        elif db_status == "Приостановлено":
+            stats["paused"] = count
+
+    return stats
+
+
+@router.put("/user/{user_id}/book/{book_id}/status", tags=["Библиотека"])
+def update_book_status(
+        user_id: str,
+        book_id: str,
+        status: BookStatus,
+        current_page: Optional[int] = None,
+        rating: Optional[float] = None,
+        review: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    содержание = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not содержание:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    user_status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == содержание.id_произведения
+        )
+    ).first()
+
+    if user_status:
+        user_status.Статус = status_to_db(status)
+        if current_page is not None:
+            user_status.current_page = current_page
+        if rating is not None:
+            user_status.Рейтинг = rating
+        if review is not None:
+            user_status.review = review
+        if status == BookStatus.FINISHED:
+            книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
+            if книга:
+                user_status.current_page = книга.Количество_страниц
+                user_status.end_date = datetime.now().isoformat()
+    else:
+        user_status = Сессия_статус(
+            id_пользователя=user_id,
+            id_произведения=содержание.id_произведения,
+            Статус=status_to_db(status),
+            current_page=current_page or 0,
+            Рейтинг=rating,
+            review=review,
+            added_date=datetime.now().isoformat()
+        )
+        db.add(user_status)
+
+    db.commit()
+    return {"message": f"Статус обновлен на {status.value}"}
+
+
+@router.put("/user/{user_id}/book/{book_id}/progress", tags=["Библиотека"])
+async def update_reading_progress(
+        user_id: str,
+        book_id: str,
+        current_page: int,
+        db: Session = Depends(get_db)
+):
+    """Обновить текущую страницу чтения"""
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not status:
+        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
+
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if book and current_page > book.Количество_страниц:
+        current_page = book.Количество_страниц
+
+    status.current_page = current_page
+    status.updated_at = datetime.now()
+
+    if book and current_page >= book.Количество_страниц:
+        status.Статус = "Прочитано"
+        status.end_date = datetime.now().isoformat()
+
+    db.commit()
+
+    progress = round(current_page / book.Количество_страниц, 3) if book and book.Количество_страниц > 0 else 0
+
+    return {
+        "message": "Прогресс обновлён",
+        "current_page": current_page,
+        "progress": progress,
+        "status": status.Статус
+    }
+
+
+@router.post("/user/{user_id}/reading-session", tags=["Библиотека"])
+async def add_reading_session(
+        user_id: str,
+        book_id: str,
+        start_page: int,
+        end_page: int,
+        duration_minutes: int,
+        quote_text: Optional[str] = None,
+        quote_page: Optional[int] = None,
+        db: Session = Depends(get_db)
+):
+    """Добавляет сессию чтения и обновляет прогресс"""
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not status:
+        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
+
+    session_id = str(uuid.uuid4())[:8]
+    pages_read = end_page - start_page
+
+    new_session = Сессии(
+        id_сессии=session_id,
+        id_пользователя=user_id,
+        id_книги=book_id,
+        Начальная_страница=start_page,
+        Последняя_страница=end_page,
+        pages_read=pages_read,
+        duration_minutes=duration_minutes,
+        Дата_начала=datetime.now().isoformat()
+    )
+    db.add(new_session)
+
+    status.current_page = end_page
+    status.reading_time_minutes = (status.reading_time_minutes or 0) + duration_minutes
+    status.updated_at = datetime.now()
+
+    if end_page >= book.Количество_страниц:
+        status.Статус = "Прочитано"
+        status.end_date = datetime.now().isoformat()
+
+    quote_id = None
+    if quote_text:
+        quote_id = str(uuid.uuid4())[:8]
+        new_quote = Цитаты(
+            id_цитаты=quote_id,
+            id_пользователя=user_id,
+            id_произведения=content.id_произведения,
+            Текст=quote_text,
+            Страница=quote_page or end_page,
+            Дата=datetime.now().isoformat()
+        )
+        db.add(new_quote)
+
+    db.commit()
+
+    progress = round(end_page / book.Количество_страниц, 3) if book.Количество_страниц > 0 else 0
+
+    return {
+        "message": "Сессия чтения добавлена",
+        "session_id": session_id,
+        "pages_read": pages_read,
+        "duration_minutes": duration_minutes,
+        "current_page": end_page,
+        "progress": progress,
+        "status": status.Статус,
+        "quote_added": quote_id is not None,
+        "quote_id": quote_id
+    }
+
+
+@router.put("/user/{user_id}/book/{book_id}/review", tags=["Библиотека"])
+async def add_review(
+        user_id: str,
+        book_id: str,
+        rating: float,
+        review: Optional[str] = None,
+        db: Session = Depends(get_db)
+):
+    """Добавить отзыв и оценку на книгу"""
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not status:
+        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
+
+    if rating < 0 or rating > 5:
+        raise HTTPException(status_code=400, detail="Рейтинг должен быть от 0 до 5")
+
+    status.Рейтинг = rating
+    if review:
+        status.review = review
+    status.updated_at = datetime.now()
+    db.commit()
+
+    return {"message": "Отзыв добавлен", "rating": rating}
+
+
+@router.delete("/user/{user_id}/book/{book_id}", tags=["Библиотека"])
+async def remove_book_from_user(
+        user_id: str,
+        book_id: str,
+        db: Session = Depends(get_db)
+):
+    """Удаляет книгу из библиотеки пользователя"""
+    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
+    if not content:
+        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
+
+    user_book = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == content.id_произведения
+        )
+    ).first()
+
+    if not user_book:
+        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке пользователя")
+
+    old_status = user_book.Статус
+    db.delete(user_book)
+
+    wishlist_item = db.query(Вишлист).filter(
+        and_(
+            Вишлист.id_пользователя == user_id,
+            Вишлист.id_книги == book_id
+        )
+    ).first()
+
+    if wishlist_item:
+        db.delete(wishlist_item)
+
+    db.commit()
+
+    return {
+        "message": f"Книга удалена из библиотеки",
+        "book_id": book_id,
+        "old_status": old_status
+    }
+
+
+@router.post("/user/{user_id}/add-book", tags=["Библиотека"])
+async def add_book_to_user(
+        user_id: str,
+        title: str,
+        author: str,
+        description: Optional[str] = None,
+        genre: Optional[str] = None,
+        pages: Optional[int] = None,
+        isbn: Optional[str] = None,
+        cover_url: Optional[str] = None,
+        cover_file: Optional[UploadFile] = None,
+        db: Session = Depends(get_db)
+):
+    """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    existing_book = None
+    if isbn:
+        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+
+    if not existing_book:
+        existing_book = db.query(Книги).filter(
+            and_(
+                Книги.Название.ilike(title.strip()),
+                Книги.Автор.ilike(author.strip())
+            )
+        ).first()
+
+    if not existing_book:
+        book_id = str(uuid.uuid4())[:8]
+        work_id = str(uuid.uuid4())[:8]
+
+        new_work = Произведения(
+            id_произведения=work_id,
+            Название=title.strip(),
+            Описание=description or "",
+            Количество_страниц=pages or 0
+        )
+        db.add(new_work)
+
+        new_book = Книги(
+            id_книги=book_id,
+            Название=title.strip(),
+            Автор=author.strip(),
+            Количество_страниц=pages or 0,
+            Описание=description or "",
+            Жанр=genre or "",
+            ISBN=isbn or "",
+            Фото_обложки=cover_url or ""
+        )
+        db.add(new_book)
+
+        content = Содержание(
+            id_книги=book_id,
+            id_произведения=work_id,
+            порядок_в_книге=1
+        )
+        db.add(content)
+
+        name_parts = author.strip().split()
+        if name_parts:
+            author_id = str(uuid.uuid4())[:8]
+            new_author = Авторы(
+                id_автора=author_id,
+                Имя=name_parts[0] if len(name_parts) > 0 else author,
+                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
+                Отчество=""
+            )
+            db.add(new_author)
+
+            труд = Труд(
+                id_автора=author_id,
+                id_произведения=work_id,
+                роль="автор"
+            )
+            db.add(труд)
+
+        db.flush()
+        created_book_id = book_id
+        created_work_id = work_id
+
+        if cover_file:
+            cover_content = await cover_file.read()
+            new_book.Фото_данные = cover_content
+            new_book.Фото_тип = cover_file.content_type
+
+        db.commit()
+    else:
+        created_book_id = existing_book.id_книги
+        content = db.query(Содержание).filter(
+            Содержание.id_книги == existing_book.id_книги
+        ).first()
+        created_work_id = content.id_произведения if content else None
+
+        if cover_file and not existing_book.Фото_данные:
+            cover_content = await cover_file.read()
+            existing_book.Фото_данные = cover_content
+            existing_book.Фото_тип = cover_file.content_type
+            db.commit()
+
+    existing_user_book = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == created_work_id
+        )
+    ).first()
+
+    if existing_user_book:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "BOOK_ALREADY_EXISTS",
+                "message": f"Книга '{title}' уже есть в вашей библиотеке",
+                "book_id": created_book_id,
+                "current_status": existing_user_book.Статус
+            }
+        )
+
+    new_status = Сессия_статус(
+        id_пользователя=user_id,
+        id_произведения=created_work_id,
+        Статус="Хочу прочитать",
+        current_page=0,
+        added_date=datetime.now().isoformat()
+    )
+    db.add(new_status)
+    db.commit()
+
+    return {
+        "message": f"Книга '{title}' добавлена в библиотеку (статус: Хочу прочитать)",
+        "book_id": created_book_id,
+        "status": "WANT_TO_READ",
+        "in_wishlist": True
+    }
+
+
+@router.post("/user/{user_id}/add-to-library", tags=["Библиотека"])
+async def add_to_library(
+        user_id: str,
+        title: str,
+        author: str,
+        description: Optional[str] = None,
+        genre: Optional[str] = None,
+        pages: Optional[int] = None,
+        isbn: Optional[str] = None,
+        cover_url: Optional[str] = None,
+        cover_file: Optional[UploadFile] = None,
+        db: Session = Depends(get_db)
+):
+    """Добавляет книгу в библиотеку со статусом 'Хочу прочитать'"""
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    existing_book = None
+    if isbn:
+        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+
+    if not existing_book:
+        existing_book = db.query(Книги).filter(
+            and_(
+                Книги.Название.ilike(title.strip()),
+                Книги.Автор.ilike(author.strip())
+            )
+        ).first()
+
+    if not existing_book:
+        book_id = str(uuid.uuid4())[:8]
+        work_id = str(uuid.uuid4())[:8]
+
+        new_work = Произведения(
+            id_произведения=work_id,
+            Название=title.strip(),
+            Описание=description or "",
+            Количество_страниц=pages or 0
+        )
+        db.add(new_work)
+
+        new_book = Книги(
+            id_книги=book_id,
+            Название=title.strip(),
+            Автор=author.strip(),
+            Количество_страниц=pages or 0,
+            Описание=description or "",
+            Жанр=genre or "",
+            ISBN=isbn or "",
+            Фото_обложки=cover_url or ""
+        )
+        db.add(new_book)
+
+        content = Содержание(
+            id_книги=book_id,
+            id_произведения=work_id,
+            порядок_в_книге=1
+        )
+        db.add(content)
+
+        name_parts = author.strip().split()
+        if name_parts:
+            author_id = str(uuid.uuid4())[:8]
+            new_author = Авторы(
+                id_автора=author_id,
+                Имя=name_parts[0] if len(name_parts) > 0 else author,
+                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
+                Отчество=""
+            )
+            db.add(new_author)
+
+            труд = Труд(
+                id_автора=author_id,
+                id_произведения=work_id,
+                роль="автор"
+            )
+            db.add(труд)
+
+        db.flush()
+        created_book_id = book_id
+        created_work_id = work_id
+
+        if cover_file:
+            cover_content = await cover_file.read()
+            new_book.Фото_данные = cover_content
+            new_book.Фото_тип = cover_file.content_type
+
+        db.commit()
+    else:
+        created_book_id = existing_book.id_книги
+        content = db.query(Содержание).filter(
+            Содержание.id_книги == existing_book.id_книги
+        ).first()
+        created_work_id = content.id_произведения if content else None
+
+    existing_status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == created_work_id
+        )
+    ).first()
+
+    if existing_status:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "BOOK_ALREADY_IN_LIBRARY",
+                "message": f"Книга '{title}' уже есть в библиотеке",
+                "book_id": created_book_id,
+                "current_status": existing_status.Статус
+            }
+        )
+
+    new_status = Сессия_статус(
+        id_пользователя=user_id,
+        id_произведения=created_work_id,
+        Статус="Хочу прочитать",
+        current_page=0,
+        added_date=datetime.now().isoformat()
+    )
+    db.add(new_status)
+    db.commit()
+
+    return {
+        "message": f"Книга '{title}' добавлена в библиотеку (Хочу прочитать)",
+        "book_id": created_book_id,
+        "status": "WANT_TO_READ",
+        "in_library": True
+    }
+
+
+# ============================================
+# ВИШЛИСТ
+# ============================================
+
+@router.get("/user/{user_id}/wishlist", response_model=List[ApiBookWithProgress], tags=["Вишлист"])
 def get_user_wishlist(
         user_id: str,
         db: Session = Depends(get_db)
 ):
-    """Получить вишлист (книги со статусом "Хочу купить")"""
+    """Получить вишлист (книги со статусом 'Хочу купить')"""
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         return []
@@ -279,59 +843,8 @@ def get_user_wishlist(
 
     return result
 
-@router.get("/user/{user_id}/reading", response_model=List[ApiBookWithProgress])
-def get_user_reading(user_id: str, db: Session = Depends(get_db)):
-    return get_user_books(user_id, BookStatus.READING, db)
 
-
-@router.get("/user/{user_id}/finished", response_model=List[ApiBookWithProgress])
-def get_user_finished(user_id: str, db: Session = Depends(get_db)):
-    return get_user_books(user_id, BookStatus.FINISHED, db)
-
-
-@router.get("/user/{user_id}/stats")
-def get_user_stats(user_id: str, db: Session = Depends(get_db)):
-    """Получить статистику чтения пользователя"""
-    status_counts = db.query(
-        Сессия_статус.Статус, db.func.count().label('count')
-    ).filter(Сессия_статус.id_пользователя == user_id).group_by(Сессия_статус.Статус).all()
-
-    total_time = db.query(db.func.sum(Сессия_статус.reading_time_minutes)).filter(
-        Сессия_статус.id_пользователя == user_id
-    ).scalar() or 0
-
-    total_pages = db.query(db.func.sum(Сессия_статус.current_page)).filter(
-        Сессия_статус.id_пользователя == user_id,
-        Сессия_статус.Статус == 'Прочитано'
-    ).scalar() or 0
-
-    avg_rating = db.query(db.func.avg(Сессия_статус.Рейтинг)).filter(
-        Сессия_статус.id_пользователя == user_id,
-        Сессия_статус.Рейтинг > 0
-    ).scalar() or 0
-
-    stats = {
-        "wishlist": 0, "reading": 0, "finished": 0, "paused": 0,
-        "total_reading_time_minutes": total_time,
-        "total_pages_read": total_pages,
-        "average_rating": round(float(avg_rating), 1)
-    }
-
-    for status_row in status_counts:
-        db_status, count = status_row
-        if db_status == "Хочу прочитать":
-            stats["wishlist"] = count
-        elif db_status == "Читаю":
-            stats["reading"] = count
-        elif db_status == "Прочитано":
-            stats["finished"] = count
-        elif db_status == "Приостановлено":
-            stats["paused"] = count
-
-    return stats
-
-
-@router.post("/user/{user_id}/add-to-wishlist")
+@router.post("/user/{user_id}/add-to-wishlist", tags=["Вишлист"])
 async def add_to_wishlist(
         user_id: str,
         title: str,
@@ -343,18 +856,11 @@ async def add_to_wishlist(
         cover_file: Optional[UploadFile] = None,
         db: Session = Depends(get_db)
 ):
-    """
-    Добавляет книгу в вишлист со статусом "Хочу купить"
-    """
-    import uuid
-    from datetime import datetime
-
-    # Проверяем пользователя
+    """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    # Ищем книгу в БД
     existing_book = None
     if isbn:
         existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
@@ -367,7 +873,6 @@ async def add_to_wishlist(
             )
         ).first()
 
-    # Создаём книгу если нет
     if not existing_book:
         book_id = str(uuid.uuid4())[:8]
         work_id = str(uuid.uuid4())[:8]
@@ -398,7 +903,6 @@ async def add_to_wishlist(
         )
         db.add(content)
 
-        # Создаём автора
         name_parts = author.strip().split()
         if name_parts:
             author_id = str(uuid.uuid4())[:8]
@@ -434,7 +938,6 @@ async def add_to_wishlist(
         ).first()
         created_work_id = content.id_произведения if content else None
 
-    # Проверяем, нет ли уже в вишлисте
     existing_wishlist = db.query(Вишлист).filter(
         and_(
             Вишлист.id_пользователя == user_id,
@@ -445,7 +948,6 @@ async def add_to_wishlist(
     if existing_wishlist:
         raise HTTPException(status_code=409, detail="Книга уже в вишлисте")
 
-    # Добавляем в вишлист
     wishlist_item = Вишлист(
         id_пользователя=user_id,
         id_книги=created_book_id,
@@ -456,21 +958,20 @@ async def add_to_wishlist(
     db.commit()
 
     return {
-        "message": f"Книга '{title}' добавлена в вишлист (Хочу)",
+        "message": f"Книга '{title}' добавлена в вишлист",
         "book_id": created_book_id,
         "status": "WANTS",
         "in_wishlist": True
     }
 
 
-@router.delete("/user/{user_id}/wishlist/{book_id}")
+@router.delete("/user/{user_id}/wishlist/{book_id}", tags=["Вишлист"])
 async def remove_from_wishlist(
         user_id: str,
         book_id: str,
         db: Session = Depends(get_db)
 ):
     """Удаляет книгу из вишлиста"""
-
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
@@ -497,7 +998,8 @@ async def remove_from_wishlist(
         "book_id": book_id
     }
 
-@router.put("/user/{user_id}/wishlist/{book_id}/priority")
+
+@router.put("/user/{user_id}/wishlist/{book_id}/priority", tags=["Вишлист"])
 async def update_wishlist_priority(
         user_id: str,
         book_id: str,
@@ -524,253 +1026,70 @@ async def update_wishlist_priority(
     return {"message": f"Приоритет изменён на {priority}"}
 
 
-@router.put("/user/{user_id}/book/{book_id}/status")
-def update_book_status(
+@router.post("/user/{user_id}/move-from-wishlist-to-library/{book_id}", tags=["Вишлист"])
+async def move_from_wishlist_to_library(
         user_id: str,
         book_id: str,
-        status: BookStatus,
-        current_page: Optional[int] = None,
-        rating: Optional[float] = None,
-        review: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
-    содержание = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not содержание:
-        raise HTTPException(status_code=404, detail="Произведение не найдено")
+    """Переносит книгу из вишлиста в библиотеку"""
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    user_status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == содержание.id_произведения
-        )
-    ).first()
-
-    if user_status:
-        user_status.Статус = status_to_db(status)
-        if current_page is not None:
-            user_status.current_page = current_page
-        if rating is not None:
-            user_status.Рейтинг = rating
-        if review is not None:
-            user_status.review = review
-        if status == BookStatus.FINISHED:
-            книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
-            if книга:
-                user_status.current_page = книга.Количество_страниц
-                user_status.end_date = datetime.now().isoformat()
-    else:
-        user_status = Сессия_статус(
-            id_пользователя=user_id,
-            id_произведения=содержание.id_произведения,
-            Статус=status_to_db(status),
-            current_page=current_page or 0,
-            Рейтинг=rating,
-            review=review,
-            added_date=datetime.now().isoformat()
-        )
-        db.add(user_status)
-
-    db.commit()
-    return {"message": f"Статус обновлен на {status.value}"}
-
-
-@router.put("/user/{user_id}/book/{book_id}/progress")
-async def update_reading_progress(
-        user_id: str,
-        book_id: str,
-        current_page: int,
-        db: Session = Depends(get_db)
-):
-    """Обновить текущую страницу чтения"""
-    # Получаем произведение
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    # Находим статус
-    status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == content.id_произведения
-        )
-    ).first()
-
-    if not status:
-        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
-
-    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if book and current_page > book.Количество_страниц:
-        current_page = book.Количество_страниц
-
-    status.current_page = current_page
-    status.updated_at = datetime.now()
-
-    # Если дошли до конца
-    if book and current_page >= book.Количество_страниц:
-        status.Статус = "Прочитано"
-        status.end_date = datetime.now().isoformat()
-
-    db.commit()
-
-    progress = round(current_page / book.Количество_страниц, 3) if book and book.Количество_страниц > 0 else 0
-
-    return {
-        "message": "Прогресс обновлён",
-        "current_page": current_page,
-        "progress": progress,
-        "status": status.Статус
-    }
-
-
-@router.post("/user/{user_id}/reading-session")
-async def add_reading_session(
-        user_id: str,
-        book_id: str,
-        start_page: int,
-        end_page: int,
-        duration_minutes: int,
-        quote_text: Optional[str] = None,  # 👈 можно сразу добавить цитату
-        quote_page: Optional[int] = None,  # 👈 страница цитаты
-        db: Session = Depends(get_db)
-):
-    """
-    Добавляет сессию чтения.
-    - Автоматически обновляет текущую страницу в статусе
-    - Если передан quote_text — сразу добавляет цитату
-    """
-    import uuid
-    from datetime import datetime
-
-    # 1. Получаем книгу и произведение
     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
+    wishlist_item = db.query(Вишлист).filter(
+        and_(
+            Вишлист.id_пользователя == user_id,
+            Вишлист.id_книги == book_id
+        )
+    ).first()
+
+    if not wishlist_item:
+        raise HTTPException(status_code=404, detail="Книга не найдена в вишлисте")
+
     content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
     if not content:
-        raise HTTPException(status_code=404, detail="Произведение не найдено")
+        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
 
-    # 2. Получаем текущий статус пользователя
-    status = db.query(Сессия_статус).filter(
+    existing_status = db.query(Сессия_статус).filter(
         and_(
             Сессия_статус.id_пользователя == user_id,
             Сессия_статус.id_произведения == content.id_произведения
         )
     ).first()
 
-    if not status:
-        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
+    if existing_status:
+        raise HTTPException(status_code=409, detail="Книга уже есть в библиотеке")
 
-    # 3. Сохраняем сессию
-    session_id = str(uuid.uuid4())[:8]
-    pages_read = end_page - start_page
+    db.delete(wishlist_item)
 
-    new_session = Сессии(
-        id_сессии=session_id,
+    new_status = Сессия_статус(
         id_пользователя=user_id,
-        id_книги=book_id,
-        Начальная_страница=start_page,
-        Последняя_страница=end_page,
-        pages_read=pages_read,
-        duration_minutes=duration_minutes,
-        Дата_начала=datetime.now().isoformat()
+        id_произведения=content.id_произведения,
+        Статус="Хочу прочитать",
+        current_page=0,
+        added_date=datetime.now().isoformat()
     )
-    db.add(new_session)
-
-    # 4. ОБНОВЛЯЕМ ПРОГРЕСС (текущую страницу)
-    status.current_page = end_page
-    status.reading_time_minutes = (status.reading_time_minutes or 0) + duration_minutes
-    status.updated_at = datetime.now()
-
-    # 5. Если дошли до конца книги
-    if end_page >= book.Количество_страниц:
-        status.Статус = "Прочитано"
-        status.end_date = datetime.now().isoformat()
-
-    # 6. Если передана цитата — добавляем её
-    quote_id = None
-    if quote_text:
-        quote_id = str(uuid.uuid4())[:8]
-        new_quote = Цитаты(
-            id_цитаты=quote_id,
-            id_пользователя=user_id,
-            id_произведения=content.id_произведения,
-            Текст=quote_text,
-            Страница=quote_page or end_page,
-            Дата=datetime.now().isoformat()
-        )
-        db.add(new_quote)
-
+    db.add(new_status)
     db.commit()
 
-    # Вычисляем процент
-    progress = round(end_page / book.Количество_страниц, 3) if book.Количество_страниц > 0 else 0
-
     return {
-        "message": "Сессия чтения добавлена",
-        "session_id": session_id,
-        "pages_read": pages_read,
-        "duration_minutes": duration_minutes,
-        "current_page": end_page,
-        "progress": progress,
-        "status": status.Статус,
-        "quote_added": quote_id is not None,
-        "quote_id": quote_id
+        "message": f"Книга '{book.Название}' перенесена из вишлиста в библиотеку",
+        "book_id": book_id,
+        "old_status": "WANTS",
+        "new_status": "WANT_TO_READ"
     }
 
 
-
-
-@router.put("/user/{user_id}/book/{book_id}/review")
-async def add_review(
-        user_id: str,
-        book_id: str,
-        rating: float,
-        review: Optional[str] = None,
-        db: Session = Depends(get_db)
-):
-    """Добавить отзыв и оценку на книгу"""
-    # Получаем произведение
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    # Находим статус
-    status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == content.id_произведения
-        )
-    ).first()
-
-    if not status:
-        raise HTTPException(status_code=404, detail="Книга не найдена в библиотеке")
-
-    if rating < 0 or rating > 5:
-        raise HTTPException(status_code=400, detail="Рейтинг должен быть от 0 до 5")
-
-    status.Рейтинг = rating
-    if review:
-        status.review = review
-    status.updated_at = datetime.now()
-    db.commit()
-
-    return {"message": "Отзыв добавлен", "rating": rating}
-
-
-
-
-
-
-
-
-
-
 # ============================================
-# КНИГИ (КАТАЛОГ)
+# КАТАЛОГ КНИГ
 # ============================================
 
-@router.get("/books", response_model=List[KotlinBook])
+@router.get("/books", response_model=List[KotlinBook], tags=["Каталог книг"])
 def get_all_books(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     книги = db.query(Книги).offset(skip).limit(limit).all()
     result = []
@@ -803,7 +1122,62 @@ def get_all_books(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
     return result
 
 
-@router.post("/books/create")
+@router.get("/books/{book_id}", response_model=KotlinBook, tags=["Каталог книг"])
+def get_book(book_id: str, db: Session = Depends(get_db)):
+    """Получить конкретную книгу по ID с обложкой из БД"""
+    книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not книга:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    авторы = []
+    содержание = db.query(Содержание).filter(
+        Содержание.id_книги == книга.id_книги
+    ).all()
+
+    for с in содержание:
+        труд = db.query(Труд).filter(
+            Труд.id_произведения == с.id_произведения
+        ).all()
+        for t in труд:
+            автор = db.query(Авторы).filter(
+                Авторы.id_автора == t.id_автора
+            ).first()
+            if автор:
+                автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                авторы.append(автор_name)
+
+    return KotlinBook.from_db_book(книга, авторы)
+
+
+@router.get("/books/search", response_model=List[KotlinBook], tags=["Каталог книг"])
+def search_books(query: str, db: Session = Depends(get_db)):
+    if not query or len(query) < 2:
+        return []
+
+    search_pattern = f"%{query}%"
+    книги = db.query(Книги).filter(
+        or_(Книги.Название.ilike(search_pattern), Книги.Автор.ilike(search_pattern))
+    ).limit(20).all()
+
+    result = []
+    for книга in книги:
+        авторы = []
+        содержание = db.query(Содержание).filter(Содержание.id_книги == книга.id_книги).all()
+        for с in содержание:
+            труд = db.query(Труд).filter(Труд.id_произведения == с.id_произведения).all()
+            for t in труд:
+                автор = db.query(Авторы).filter(Авторы.id_автора == t.id_автора).first()
+                if автор:
+                    автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                    if автор_name not in авторы:
+                        авторы.append(автор_name)
+
+        result.append(KotlinBook.from_db_book(книга, авторы))
+
+    return result
+
+
+@router.post("/books/create", tags=["Каталог книг"])
 async def create_book(
         title: str,
         author: str,
@@ -816,8 +1190,7 @@ async def create_book(
         cover_file: Optional[UploadFile] = None,
         db: Session = Depends(get_db)
 ):
-    """Создание новой книги в каталоге (без привязки к пользователю)"""
-    # Проверяем, нет ли уже такой книги
+    """Создание новой книги в каталоге"""
     existing = db.query(Книги).filter(
         and_(
             Книги.Название.ilike(title.strip()),
@@ -831,7 +1204,6 @@ async def create_book(
     book_id = str(uuid.uuid4())[:8]
     work_id = str(uuid.uuid4())[:8]
 
-    # Создаём произведение
     new_work = Произведения(
         id_произведения=work_id,
         Название=title.strip(),
@@ -840,7 +1212,6 @@ async def create_book(
     )
     db.add(new_work)
 
-    # Создаём книгу
     new_book = Книги(
         id_книги=book_id,
         Название=title.strip(),
@@ -854,7 +1225,6 @@ async def create_book(
     )
     db.add(new_book)
 
-    # Связываем
     content = Содержание(
         id_книги=book_id,
         id_произведения=work_id,
@@ -862,7 +1232,6 @@ async def create_book(
     )
     db.add(content)
 
-    # Создаём автора (упрощённо)
     author_id = str(uuid.uuid4())[:8]
     name_parts = author.strip().split()
     new_author = Авторы(
@@ -873,7 +1242,6 @@ async def create_book(
     )
     db.add(new_author)
 
-    # Связываем автора с произведением
     труд = Труд(
         id_автора=author_id,
         id_произведения=work_id,
@@ -881,7 +1249,6 @@ async def create_book(
     )
     db.add(труд)
 
-    # Обложка
     if cover_file:
         cover_content = await cover_file.read()
         new_book.Фото_данные = cover_content
@@ -892,7 +1259,7 @@ async def create_book(
     return {"message": "Книга создана", "book_id": book_id}
 
 
-@router.put("/books/{book_id}")
+@router.put("/books/{book_id}", tags=["Каталог книг"])
 async def update_book(
         book_id: str,
         title: Optional[str] = None,
@@ -933,7 +1300,7 @@ async def update_book(
     return {"message": "Книга обновлена"}
 
 
-@router.delete("/books/{book_id}")
+@router.delete("/books/{book_id}", tags=["Каталог книг"])
 async def delete_book(
         book_id: str,
         db: Session = Depends(get_db)
@@ -943,7 +1310,6 @@ async def delete_book(
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
-    # Проверяем, есть ли связи с пользователями
     content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
     if content:
         status_exists = db.query(Сессия_статус).filter(
@@ -961,89 +1327,17 @@ async def delete_book(
     return {"message": "Книга удалена"}
 
 
-@router.get("/books/search", response_model=List[KotlinBook])
-def search_books(query: str, db: Session = Depends(get_db)):
-    if not query or len(query) < 2:
-        return []
-
-    search_pattern = f"%{query}%"
-    книги = db.query(Книги).filter(
-        or_(Книги.Название.ilike(search_pattern), Книги.Автор.ilike(search_pattern))
-    ).limit(20).all()
-
-    result = []
-    for книга in книги:
-        авторы = []
-        содержание = db.query(Содержание).filter(Содержание.id_книги == книга.id_книги).all()
-        for с in содержание:
-            труд = db.query(Труд).filter(Труд.id_произведения == с.id_произведения).all()
-            for t in труд:
-                автор = db.query(Авторы).filter(Авторы.id_автора == t.id_автора).first()
-                if автор:
-                    автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
-                    if автор_name not in авторы:
-                        авторы.append(автор_name)
-
-        result.append(KotlinBook.from_db_book(книга, авторы))
-
-    return result
-
-
-@router.get("/books/{book_id}", response_model=KotlinBook)
-def get_book(book_id: str, db: Session = Depends(get_db)):
-    """Получить конкретную книгу по ID с обложкой из БД"""
-    книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if not книга:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    # Получаем авторов
-    авторы = []
-    содержание = db.query(Содержание).filter(
-        Содержание.id_книги == книга.id_книги
-    ).all()
-
-    for с in содержание:
-        труд = db.query(Труд).filter(
-            Труд.id_произведения == с.id_произведения
-        ).all()
-        for t in труд:
-            автор = db.query(Авторы).filter(
-                Авторы.id_автора == t.id_автора
-            ).first()
-            if автор:
-                автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
-                авторы.append(автор_name)
-
-    # Конвертируем в Kotlin модель (включая base64 обложку)
-    return KotlinBook.from_db_book(книга, авторы)
-
-
-
-
-
-
-
-
-
-
-# ============================================
-# ЗАГРУЗКА ОБЛОЖЕК
-# ============================================
-
-@router.post("/books/{book_id}/upload-cover")
+@router.post("/books/{book_id}/upload-cover", tags=["Каталог книг"])
 async def upload_book_cover(
         book_id: str,
         file: UploadFile = File(...),
         db: Session = Depends(get_db)
 ):
     """Загружает обложку в БД и на Яндекс.Диск"""
-
-    # Проверяем книгу
     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
-    # Проверяем формат
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
     file_extension = os.path.splitext(file.filename)[1].lower()
     if file_extension not in allowed_extensions:
@@ -1053,7 +1347,6 @@ async def upload_book_cover(
         )
 
     try:
-        # Загружаем в БД и на Яндекс.Диск
         result = await upload_cover_to_yandex_disk_and_db(file, book_id, db)
 
         return {
@@ -1068,18 +1361,76 @@ async def upload_book_cover(
         raise HTTPException(status_code=500, detail=f"Не удалось загрузить обложку: {str(e)}")
 
 
+@router.get("/covers/{book_id}", tags=["Каталог книг"])
+def get_cover(book_id: str, db: Session = Depends(get_db)):
+    """Отдаёт обложку книги как изображение"""
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book or not book.Фото_данные:
+        raise HTTPException(status_code=404, detail="Обложка не найдена")
 
-
-
-
-
+    return Response(
+        content=book.Фото_данные,
+        media_type=book.Фото_тип or "image/jpeg"
+    )
 
 
 # ============================================
-# ЦИТАТЫ И ТЭГИ
+# ПОИСК КНИГ (Внешние API)
 # ============================================
 
-@router.post("/user/{user_id}/quotes")
+@router.get("/search/combined", tags=["Поиск книг"])
+async def combined_book_search(
+        query: str,
+        db: Session = Depends(get_db)
+):
+    """Комбинированный поиск книг из всех источников"""
+    if not query or len(query) < 2:
+        return {"found": 0, "books": [], "message": "Запрос слишком короткий"}
+
+    results = await combined_search.search_all(query, db)
+
+    return {
+        "found": len(results),
+        "query": query,
+        "books": results,
+        "sources": ["Google Books", "OpenLibrary", "Apple iTunes", "Локальная база"]
+    }
+
+
+@router.get("/search/combined/isbn/{isbn}", tags=["Поиск книг"])
+async def combined_search_by_isbn(
+        isbn: str,
+        db: Session = Depends(get_db)
+):
+    """Поиск книги по ISBN во всех источниках"""
+    local_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+    if local_book:
+        return {
+            "found": True,
+            "book": {
+                "title": local_book.Название,
+                "author": local_book.Автор,
+                "description": local_book.Описание,
+                "pages": local_book.Количество_страниц,
+                "isbn": local_book.ISBN,
+                "source": "Локальная база",
+                "local_id": local_book.id_книги
+            }
+        }
+
+    results = await combined_search.search_all(isbn)
+
+    if results:
+        return {"found": True, "book": results[0]}
+    else:
+        return {"found": False, "message": "Книга не найдена ни в одном источнике"}
+
+
+# ============================================
+# ЦИТАТЫ
+# ============================================
+
+@router.post("/user/{user_id}/quotes", tags=["Цитаты"])
 async def add_quote(
         user_id: str,
         book_id: str,
@@ -1089,12 +1440,10 @@ async def add_quote(
         db: Session = Depends(get_db)
 ):
     """Добавить цитату из книги"""
-    # Проверяем книгу
     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
-    # Получаем произведение
     content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
     if not content:
         raise HTTPException(status_code=404, detail="Произведение не найдено")
@@ -1112,12 +1461,10 @@ async def add_quote(
     db.add(new_quote)
     db.flush()
 
-    # Добавляем теги
     if tags:
         for tag_name in tags:
             tag = db.query(Тэги).filter(Тэги.Название == tag_name).first()
             if not tag:
-                # Создаём новый тег
                 tag_id = str(uuid.uuid4())[:8]
                 tag = Тэги(
                     id_тэга=tag_id,
@@ -1127,7 +1474,6 @@ async def add_quote(
                 db.add(tag)
                 db.flush()
 
-            # Связываем цитату с тегом
             quote_tag = Связь_цитаты_тэги(
                 id_цитаты=quote_id,
                 id_тэга=tag.id_тэга
@@ -1139,7 +1485,7 @@ async def add_quote(
     return {"message": "Цитата добавлена", "quote_id": quote_id}
 
 
-@router.get("/user/{user_id}/quotes")
+@router.get("/user/{user_id}/quotes", tags=["Цитаты"])
 async def get_user_quotes(
         user_id: str,
         book_id: Optional[str] = None,
@@ -1168,7 +1514,7 @@ async def get_user_quotes(
     return result
 
 
-@router.delete("/quotes/{quote_id}")
+@router.delete("/quotes/{quote_id}", tags=["Цитаты"])
 async def delete_quote(
         quote_id: str,
         db: Session = Depends(get_db)
@@ -1182,558 +1528,3 @@ async def delete_quote(
     db.commit()
 
     return {"message": "Цитата удалена"}
-
-
-
-
-
-
-
-
-
-# ============================================
-# ДОБАВЛЕНИЕ КНИГИ ПОЛЬЗОВАТЕЛЕМ (ОСНОВНОЙ МЕТОД)
-# ============================================
-
-@router.post("/user/{user_id}/add-book")
-async def add_book_to_user(
-        user_id: str,
-        title: str,
-        author: str,
-        description: Optional[str] = None,
-        genre: Optional[str] = None,
-        pages: Optional[int] = None,
-        isbn: Optional[str] = None,
-        cover_url: Optional[str] = None,
-        cover_file: Optional[UploadFile] = None,
-        db: Session = Depends(get_db)
-):
-    """
-    Добавляет книгу пользователю.
-    - Если книга уже есть у пользователя → ошибка 409
-    - Если книги нет в БД → создаёт новую
-    - Если книга есть в БД, но нет у пользователя → связывает с пользователем
-    - Статус всегда "Хочу прочитать" → книга автоматически попадает в вишлист
-    """
-    import uuid
-    from datetime import datetime
-
-    # 1. Проверяем существование пользователя
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # 2. Ищем книгу в БД по ISBN, названию и автору
-    existing_book = None
-    if isbn:
-        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
-
-    if not existing_book:
-        existing_book = db.query(Книги).filter(
-            and_(
-                Книги.Название.ilike(title.strip()),
-                Книги.Автор.ilike(author.strip())
-            )
-        ).first()
-
-    # 3. Если книги нет в БД — создаём новую
-    if not existing_book:
-        book_id = str(uuid.uuid4())[:8]
-        work_id = str(uuid.uuid4())[:8]
-
-        # Создаём произведение
-        new_work = Произведения(
-            id_произведения=work_id,
-            Название=title.strip(),
-            Описание=description or "",
-            Количество_страниц=pages or 0
-        )
-        db.add(new_work)
-
-        # Создаём книгу
-        new_book = Книги(
-            id_книги=book_id,
-            Название=title.strip(),
-            Автор=author.strip(),
-            Количество_страниц=pages or 0,
-            Описание=description or "",
-            Жанр=genre or "",
-            ISBN=isbn or "",
-            Фото_обложки=cover_url or ""
-        )
-        db.add(new_book)
-
-        # Связываем книгу и произведение
-        content = Содержание(
-            id_книги=book_id,
-            id_произведения=work_id,
-            порядок_в_книге=1
-        )
-        db.add(content)
-
-        # Создаём автора (упрощённо)
-        name_parts = author.strip().split()
-        if name_parts:
-            author_id = str(uuid.uuid4())[:8]
-            new_author = Авторы(
-                id_автора=author_id,
-                Имя=name_parts[0] if len(name_parts) > 0 else author,
-                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
-                Отчество=""
-            )
-            db.add(new_author)
-
-            труд = Труд(
-                id_автора=author_id,
-                id_произведения=work_id,
-                роль="автор"
-            )
-            db.add(труд)
-
-        db.flush()
-        created_book_id = book_id
-        created_work_id = work_id
-
-        # Если передан файл обложки — сохраняем сразу
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
-
-        db.commit()
-    else:
-        # Книга уже есть в БД
-        created_book_id = existing_book.id_книги
-
-        # Получаем произведение для этой книги
-        content = db.query(Содержание).filter(
-            Содержание.id_книги == existing_book.id_книги
-        ).first()
-        if content:
-            created_work_id = content.id_произведения
-        else:
-            raise HTTPException(status_code=500, detail="Ошибка связи книги с произведением")
-
-        # Если передан файл обложки и у книги ещё нет обложки — сохраняем
-        if cover_file and not existing_book.Фото_данные:
-            cover_content = await cover_file.read()
-            existing_book.Фото_данные = cover_content
-            existing_book.Фото_тип = cover_file.content_type
-            db.commit()
-
-    # 4. ПРОВЕРКА: есть ли уже эта книга у пользователя?
-    existing_user_book = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == created_work_id
-        )
-    ).first()
-
-    if existing_user_book:
-        # Книга уже есть в библиотеке пользователя
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "BOOK_ALREADY_EXISTS",
-                "message": f"Книга '{title}' уже есть в вашей библиотеке",
-                "book_id": created_book_id,
-                "current_status": existing_user_book.Статус
-            }
-        )
-
-    # 5. Добавляем статус "Хочу прочитать" (это автоматически означает вишлист)
-    new_status = Сессия_статус(
-        id_пользователя=user_id,
-        id_произведения=created_work_id,
-        Статус="Хочу прочитать",
-        current_page=0,
-        added_date=datetime.now().isoformat()
-    )
-    db.add(new_status)
-    db.commit()
-
-    return {
-        "message": f"Книга '{title}' добавлена в библиотеку (статус: Хочу прочитать)",
-        "book_id": created_book_id,
-        "status": "WANT_TO_READ",
-        "in_wishlist": True
-    }
-
-
-
-
-
-
-
-
-
-
-# ============================================
-# КОМБИНИРОВАННЫЙ ПОИСК КНИГ
-# ============================================
-
-from services.book_search import combined_search
-
-
-@router.get("/search/combined")
-async def combined_book_search(
-        query: str,
-        db: Session = Depends(get_db)
-):
-    """
-    Комбинированный поиск книг из всех источников:
-    - Google Books
-    - OpenLibrary
-    - Apple iTunes
-    - Локальная база данных
-    """
-    if not query or len(query) < 2:
-        return {"found": 0, "books": [], "message": "Запрос слишком короткий"}
-
-    results = await combined_search.search_all(query, db)
-
-    return {
-        "found": len(results),
-        "query": query,
-        "books": results,
-        "sources": ["Google Books", "OpenLibrary", "Apple iTunes", "Локальная база"]
-    }
-
-
-@router.get("/search/combined/isbn/{isbn}")
-async def combined_search_by_isbn(
-        isbn: str,
-        db: Session = Depends(get_db)
-):
-    """
-    Поиск книги по ISBN во всех источниках
-    """
-    # Сначала ищем в локальной БД
-    from models.sql_models import Книги
-
-    local_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
-    if local_book:
-        return {
-            "found": True,
-            "book": {
-                "title": local_book.Название,
-                "author": local_book.Автор,
-                "description": local_book.Описание,
-                "pages": local_book.Количество_страниц,
-                "isbn": local_book.ISBN,
-                "source": "Локальная база",
-                "local_id": local_book.id_книги
-            }
-        }
-
-    # Ищем во внешних API
-    results = await combined_search.search_all(isbn)
-
-    if results:
-        return {"found": True, "book": results[0]}
-    else:
-        return {"found": False, "message": "Книга не найдена ни в одном источнике"}
-
-
-@router.delete("/user/{user_id}/book/{book_id}")
-async def remove_book_from_user(
-        user_id: str,
-        book_id: str,
-        db: Session = Depends(get_db)
-):
-    """
-    Удаляет книгу из библиотеки пользователя.
-    - Удаляется запись из Сессия_статус (связь пользователь-книга)
-    - Если книга была в вишлисте, удаляется и оттуда
-    - Сама книга из каталога НЕ удаляется (может быть у других пользователей)
-    """
-    from models.sql_models import Сессия_статус, Вишлист
-
-    # 1. Проверяем существование пользователя
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # 2. Проверяем существование книги
-    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if not book:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    # 3. Получаем произведение для этой книги
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
-
-    # 4. Ищем связь пользователя с книгой
-    user_book = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == content.id_произведения
-        )
-    ).first()
-
-    if not user_book:
-        raise HTTPException(
-            status_code=404,
-            detail="Книга не найдена в библиотеке пользователя"
-        )
-
-    # 5. Запоминаем статус для ответа
-    old_status = user_book.Статус
-
-    # 6. Удаляем связь пользователя с книгой
-    db.delete(user_book)
-
-    # 7. Если книга была в вишлисте — удаляем оттуда
-    wishlist_item = db.query(Вишлист).filter(
-        and_(
-            Вишлист.id_пользователя == user_id,
-            Вишлист.id_книги == book_id
-        )
-    ).first()
-
-    if wishlist_item:
-        db.delete(wishlist_item)
-
-    db.commit()
-
-    return {
-        "message": f"Книга '{book.Название}' удалена из библиотеки",
-        "book_id": book_id,
-        "book_title": book.Название,
-        "old_status": old_status
-    }
-
-
-@router.post("/user/{user_id}/move-from-wishlist-to-library/{book_id}")
-async def move_from_wishlist_to_library(
-        user_id: str,
-        book_id: str,
-        db: Session = Depends(get_db)
-):
-    """
-    Переносит книгу из вишлиста в библиотеку.
-    - Удаляет из вишлиста
-    - Добавляет в библиотеку со статусом "Хочу прочитать"
-    """
-    from datetime import datetime
-
-    # Проверяем пользователя
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # Проверяем книгу
-    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if not book:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    # Проверяем, есть ли в вишлисте
-    wishlist_item = db.query(Вишлист).filter(
-        and_(
-            Вишлист.id_пользователя == user_id,
-            Вишлист.id_книги == book_id
-        )
-    ).first()
-
-    if not wishlist_item:
-        raise HTTPException(status_code=404, detail="Книга не найдена в вишлисте")
-
-    # Получаем произведение
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
-
-    # Проверяем, нет ли уже в библиотеке
-    existing_status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == content.id_произведения
-        )
-    ).first()
-
-    if existing_status:
-        raise HTTPException(
-            status_code=409,
-            detail="Книга уже есть в библиотеке"
-        )
-
-    # Удаляем из вишлиста
-    db.delete(wishlist_item)
-
-    # Добавляем в библиотеку
-    new_status = Сессия_статус(
-        id_пользователя=user_id,
-        id_произведения=content.id_произведения,
-        Статус="Хочу прочитать",
-        current_page=0,
-        added_date=datetime.now().isoformat()
-    )
-    db.add(new_status)
-    db.commit()
-
-    return {
-        "message": f"Книга '{book.Название}' перенесена из вишлиста в библиотеку",
-        "book_id": book_id,
-        "old_status": "WANTS",
-        "new_status": "WANT_TO_READ"
-    }
-
-
-@router.post("/user/{user_id}/add-to-library")
-async def add_to_library(
-        user_id: str,
-        title: str,
-        author: str,
-        description: Optional[str] = None,
-        genre: Optional[str] = None,
-        pages: Optional[int] = None,
-        isbn: Optional[str] = None,
-        cover_url: Optional[str] = None,
-        cover_file: Optional[UploadFile] = None,
-        db: Session = Depends(get_db)
-):
-    """
-    Добавляет книгу в библиотеку со статусом "Хочу прочитать"
-    """
-    import uuid
-    from datetime import datetime
-
-    # Проверяем пользователя
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
-
-    # Ищем книгу в БД
-    existing_book = None
-    if isbn:
-        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
-
-    if not existing_book:
-        existing_book = db.query(Книги).filter(
-            and_(
-                Книги.Название.ilike(title.strip()),
-                Книги.Автор.ilike(author.strip())
-            )
-        ).first()
-
-    # Создаём книгу если нет
-    if not existing_book:
-        book_id = str(uuid.uuid4())[:8]
-        work_id = str(uuid.uuid4())[:8]
-
-        new_work = Произведения(
-            id_произведения=work_id,
-            Название=title.strip(),
-            Описание=description or "",
-            Количество_страниц=pages or 0
-        )
-        db.add(new_work)
-
-        new_book = Книги(
-            id_книги=book_id,
-            Название=title.strip(),
-            Автор=author.strip(),
-            Количество_страниц=pages or 0,
-            Описание=description or "",
-            Жанр=genre or "",
-            ISBN=isbn or "",
-            Фото_обложки=cover_url or ""
-        )
-        db.add(new_book)
-
-        content = Содержание(
-            id_книги=book_id,
-            id_произведения=work_id,
-            порядок_в_книге=1
-        )
-        db.add(content)
-
-        # Создаём автора
-        name_parts = author.strip().split()
-        if name_parts:
-            author_id = str(uuid.uuid4())[:8]
-            new_author = Авторы(
-                id_автора=author_id,
-                Имя=name_parts[0] if len(name_parts) > 0 else author,
-                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
-                Отчество=""
-            )
-            db.add(new_author)
-
-            труд = Труд(
-                id_автора=author_id,
-                id_произведения=work_id,
-                роль="автор"
-            )
-            db.add(труд)
-
-        db.flush()
-        created_book_id = book_id
-        created_work_id = work_id
-
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
-
-        db.commit()
-    else:
-        created_book_id = existing_book.id_книги
-        content = db.query(Содержание).filter(
-            Содержание.id_книги == existing_book.id_книги
-        ).first()
-        created_work_id = content.id_произведения if content else None
-
-    # Проверяем, нет ли уже в библиотеке
-    existing_status = db.query(Сессия_статус).filter(
-        and_(
-            Сессия_статус.id_пользователя == user_id,
-            Сессия_статус.id_произведения == created_work_id
-        )
-    ).first()
-
-    if existing_status:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "BOOK_ALREADY_IN_LIBRARY",
-                "message": f"Книга '{title}' уже есть в библиотеке",
-                "book_id": created_book_id,
-                "current_status": existing_status.Статус
-            }
-        )
-
-    # Добавляем статус "Хочу прочитать"
-    new_status = Сессия_статус(
-        id_пользователя=user_id,
-        id_произведения=created_work_id,
-        Статус="Хочу прочитать",
-        current_page=0,
-        added_date=datetime.now().isoformat()
-    )
-    db.add(new_status)
-    db.commit()
-
-    return {
-        "message": f"Книга '{title}' добавлена в библиотеку (Хочу прочитать)",
-        "book_id": created_book_id,
-        "status": "WANT_TO_READ",
-        "in_library": True
-    }
-
-
-from fastapi.responses import Response
-
-
-@router.get("/covers/{book_id}")
-def get_cover(book_id: str, db: Session = Depends(get_db)):
-    """Отдаёт обложку книги как изображение"""
-    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if not book or not book.Фото_данные:
-        raise HTTPException(status_code=404, detail="Обложка не найдена")
-
-    return Response(
-        content=book.Фото_данные,
-        media_type=book.Фото_тип or "image/jpeg"
-    )
