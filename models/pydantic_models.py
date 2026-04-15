@@ -212,7 +212,7 @@ class KotlinBook(BaseModel):
     id: str = ""
     title: str = ""
     author: str = ""
-    coverUrl: str = ""  # 👈 теперь будет ссылка на /api/covers/{id}
+    coverUrl: str = ""
     description: str = ""
     pages: int = 0
     genre: str = ""
@@ -222,18 +222,14 @@ class KotlinBook(BaseModel):
 
     @classmethod
     def from_db_book(cls, book, authors: List[str] = None):
-        # Формируем URL для доступа к обложке через API
-        cover_url = ""
-        if hasattr(book, 'Фото_данные') and book.Фото_данные:
-            cover_url = f"/api/covers/{book.id_книги}"
-        elif hasattr(book, 'Фото_обложки') and book.Фото_обложки:
-            cover_url = book.Фото_обложки
+        # Берём ссылку из поля Фото_обложки (Google Drive URL)
+        cover_url = getattr(book, 'Фото_обложки', '') or ""
 
         return cls(
             id=book.id_книги,
             title=book.Название,
             author=", ".join(authors) if authors else getattr(book, 'Автор', ''),
-            coverUrl=cover_url,  # 👈 теперь прямая ссылка на API
+            coverUrl=cover_url,
             description=getattr(book, 'Описание', '') or "",
             pages=getattr(book, 'Количество_страниц', 0),
             genre=getattr(book, 'Жанр', '') or "",

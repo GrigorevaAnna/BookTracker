@@ -9,6 +9,7 @@ import uuid
 import httpx
 
 from services.book_search import combined_search
+from services.google_drive import upload_cover_to_google_drive
 
 from database.database import get_db
 from models.sql_models import (
@@ -21,7 +22,8 @@ from models.pydantic_models import (
     BookStatus, status_from_db, status_to_db
 )
 
-from services.yandex_disk import upload_cover_to_yandex_disk_and_db
+# from services.yandex_disk import upload_cover_to_yandex_disk_and_db
+
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -1327,13 +1329,47 @@ async def delete_book(
     return {"message": "Книга удалена"}
 
 
+# @router.post("/books/{book_id}/upload-cover", tags=["Каталог книг"])
+# async def upload_book_cover(
+#         book_id: str,
+#         file: UploadFile = File(...),
+#         db: Session = Depends(get_db)
+# ):
+#     """Загружает обложку в БД и на Яндекс.Диск"""
+#     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+#     if not book:
+#         raise HTTPException(status_code=404, detail="Книга не найдена")
+#
+#     allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp'}
+#     file_extension = os.path.splitext(file.filename)[1].lower()
+#     if file_extension not in allowed_extensions:
+#         raise HTTPException(
+#             status_code=400,
+#             detail="Можно загружать только изображения (jpg, png, gif, webp)"
+#         )
+#
+#     try:
+#         result = await upload_cover_to_yandex_disk_and_db(file, book_id, db)
+#
+#         return {
+#             "message": "Обложка успешно загружена и сохранена в базу данных",
+#             "cover_url": result.get("cover_url"),
+#             "cover_data": result.get("cover_data"),
+#             "cover_type": result.get("cover_type")
+#         }
+#
+#     except Exception as e:
+#         print(f"Ошибка при загрузке обложки: {e}")
+#         raise HTTPException(status_code=500, detail=f"Не удалось загрузить обложку: {str(e)}")
+
+
 @router.post("/books/{book_id}/upload-cover", tags=["Каталог книг"])
 async def upload_book_cover(
         book_id: str,
         file: UploadFile = File(...),
         db: Session = Depends(get_db)
 ):
-    """Загружает обложку в БД и на Яндекс.Диск"""
+    """Загружает обложку на Google Drive"""
     book = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not book:
         raise HTTPException(status_code=404, detail="Книга не найдена")
@@ -1347,18 +1383,22 @@ async def upload_book_cover(
         )
 
     try:
-        result = await upload_cover_to_yandex_disk_and_db(file, book_id, db)
+        cover_url = await upload_cover_to_google_drive(file, book_id)
+
+        # Сохраняем URL в БД
+        book.Фото_обложки = cover_url
+        db.commit()
 
         return {
-            "message": "Обложка успешно загружена и сохранена в базу данных",
-            "cover_url": result.get("cover_url"),
-            "cover_data": result.get("cover_data"),
-            "cover_type": result.get("cover_type")
+            "message": "Обложка успешно загружена",
+            "cover_url": cover_url
         }
 
     except Exception as e:
         print(f"Ошибка при загрузке обложки: {e}")
         raise HTTPException(status_code=500, detail=f"Не удалось загрузить обложку: {str(e)}")
+
+
 
 
 @router.get("/covers/{book_id}", tags=["Каталог книг"])
