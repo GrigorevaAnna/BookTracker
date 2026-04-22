@@ -1544,11 +1544,35 @@ async def get_user_quotes(
 
     result = []
     for q in quotes:
+        # Получаем книгу через произведение
+        произведение = db.query(Произведения).filter(
+            Произведения.id_произведения == q.id_произведения
+        ).first()
+
+        book_info = None
+        if произведение:
+            содержание = db.query(Содержание).filter(
+                Содержание.id_произведения == произведение.id_произведения
+            ).first()
+            if содержание:
+                книга = db.query(Книги).filter(
+                    Книги.id_книги == содержание.id_книги
+                ).first()
+                if книга:
+                    book_info = {
+                        "book_id": книга.id_книги,
+                        "book_title": книга.Название,
+                        "book_author": книга.Автор
+                    }
+
         result.append({
             "id": q.id_цитаты,
             "text": q.Текст,
             "page": q.Страница,
-            "date": q.Дата
+            "date": q.Дата,
+            "book_id": book_info["book_id"] if book_info else None,
+            "book_title": book_info["book_title"] if book_info else None,
+            "book_author": book_info["book_author"] if book_info else None
         })
 
     return result
