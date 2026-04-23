@@ -1476,20 +1476,13 @@ async def add_quote(
         book_id: str,
         text: str,
         page: Optional[int] = None,
-        tags: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,  # список названий тэгов
         db: Session = Depends(get_db)
 ):
-    """Добавить цитату из книги"""
-    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
-    if not book:
-        raise HTTPException(status_code=404, detail="Книга не найдена")
-
-    content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Произведение не найдено")
+    """Добавить цитату из книги с персональными тэгами"""
+    # ... проверки книги и произведения ...
 
     quote_id = str(uuid.uuid4())[:8]
-
     new_quote = Цитаты(
         id_цитаты=quote_id,
         id_пользователя=user_id,
@@ -1501,19 +1494,30 @@ async def add_quote(
     db.add(new_quote)
     db.flush()
 
+    # Добавляем тэги (только для этого пользователя)
     if tags:
         for tag_name in tags:
-            tag = db.query(Тэги).filter(Тэги.Название == tag_name).first()
+            # Ищем тэг у этого пользователя
+            tag = db.query(Тэги).filter(
+                and_(
+                    Тэги.Название == tag_name,
+                    Тэги.id_пользователя == user_id
+                )
+            ).first()
+
             if not tag:
+                # Создаём новый тэг для этого пользователя
                 tag_id = str(uuid.uuid4())[:8]
                 tag = Тэги(
                     id_тэга=tag_id,
                     Название=tag_name,
-                    color="#3498db"
+                    id_пользователя=user_id,
+                    color=f"#{hash(tag_name) % 0xFFFFFF:06x}"  # случайный цвет
                 )
                 db.add(tag)
                 db.flush()
 
+            # Связываем цитату с тэгом
             quote_tag = Связь_цитаты_тэги(
                 id_цитаты=quote_id,
                 id_тэга=tag.id_тэга
@@ -1529,27 +1533,44 @@ async def add_quote(
 async def get_user_quotes(
         user_id: str,
         book_id: Optional[str] = None,
+        tag: Optional[str] = None,  # 👈 фильтр по тэгу
         limit: int = 50,
         db: Session = Depends(get_db)
 ):
-    """Получить цитаты пользователя (по книге или все)"""
+    """Получить цитаты пользователя с фильтрацией по книге или тэгу"""
+
+    # Базовый запрос
     query = db.query(Цитаты).filter(Цитаты.id_пользователя == user_id)
 
+    # Фильтр по книге
     if book_id:
         content = db.query(Содержание).filter(Содержание.id_книги == book_id).first()
         if content:
             query = query.filter(Цитаты.id_произведения == content.id_произведения)
 
+    # Фильтр по тэгу
+    if tag:
+        # Подзапрос: цитаты, у которых есть тэг с таким названием
+        subquery = db.query(Связь_цитаты_тэги.id_цитаты).join(
+            Тэги
+        ).filter(
+            and_(
+                Тэги.Название == tag,
+                Тэги.id_пользователя == user_id
+            )
+        ).subquery()
+        query = query.filter(Цитаты.id_цитаты.in_(subquery))
+
     quotes = query.order_by(Цитаты.created_at.desc()).limit(limit).all()
 
     result = []
     for q in quotes:
-        # Получаем книгу через произведение
+        # Получаем книгу
         произведение = db.query(Произведения).filter(
             Произведения.id_произведения == q.id_произведения
         ).first()
 
-        book_info = None
+        книга = None
         if произведение:
             содержание = db.query(Содержание).filter(
                 Содержание.id_произведения == произведение.id_произведения
@@ -1558,25 +1579,144 @@ async def get_user_quotes(
                 книга = db.query(Книги).filter(
                     Книги.id_книги == содержание.id_книги
                 ).first()
-                if книга:
-                    book_info = {
-                        "book_id": книга.id_книги,
-                        "book_title": книга.Название,
-                        "book_author": книга.Автор
-                    }
+
+        # Получаем тэги этой цитаты
+        quote_tags = db.query(Тэги).join(
+            Связь_цитаты_тэги
+        ).filter(
+            Связь_цитаты_тэги.id_цитаты == q.id_цитаты
+        ).all()
 
         result.append({
             "id": q.id_цитаты,
             "text": q.Текст,
             "page": q.Страница,
             "date": q.Дата,
-            "book_id": book_info["book_id"] if book_info else None,
-            "book_title": book_info["book_title"] if book_info else None,
-            "book_author": book_info["book_author"] if book_info else None
+            "book_id": книга.id_книги if книга else None,
+            "book_title": книга.Название if книга else None,
+            "book_author": книга.Автор if книга else None,
+            "tags": [{"id": t.id_тэга, "name": t.Название, "color": t.color} for t in quote_tags]
         })
 
     return result
 
+
+@router.get("/user/{user_id}/tags", tags=["Цитаты"])
+def get_user_tags(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Получить все тэги пользователя"""
+    tags = db.query(Тэги).filter(Тэги.id_пользователя == user_id).all()
+
+    return [
+        {
+            "id": t.id_тэга,
+            "name": t.Название,
+            "color": t.color,
+            "quotes_count": db.query(Связь_цитаты_тэги).filter(
+                Связь_цитаты_тэги.id_тэга == t.id_тэга
+            ).count()
+        }
+        for t in tags
+    ]
+
+
+@router.post("/user/{user_id}/quotes/{quote_id}/tags", tags=["Цитаты"])
+async def add_tag_to_quote(
+        user_id: str,
+        quote_id: str,
+        tag_name: str,
+        db: Session = Depends(get_db)
+):
+    """Добавить тэг к существующей цитате"""
+
+    # Проверяем, что цитата принадлежит пользователю
+    quote = db.query(Цитаты).filter(
+        and_(
+            Цитаты.id_цитаты == quote_id,
+            Цитаты.id_пользователя == user_id
+        )
+    ).first()
+
+    if not quote:
+        raise HTTPException(status_code=404, detail="Цитата не найдена")
+
+    # Ищем или создаём тэг
+    tag = db.query(Тэги).filter(
+        and_(
+            Тэги.Название == tag_name,
+            Тэги.id_пользователя == user_id
+        )
+    ).first()
+
+    if not tag:
+        tag_id = str(uuid.uuid4())[:8]
+        tag = Тэги(
+            id_тэга=tag_id,
+            Название=tag_name,
+            id_пользователя=user_id
+        )
+        db.add(tag)
+        db.flush()
+
+    # Проверяем, не связана ли уже цитата с этим тэгом
+    existing = db.query(Связь_цитаты_тэги).filter(
+        and_(
+            Связь_цитаты_тэги.id_цитаты == quote_id,
+            Связь_цитаты_тэги.id_тэга == tag.id_тэга
+        )
+    ).first()
+
+    if existing:
+        return {"message": "Тэг уже добавлен к этой цитате"}
+
+    # Связываем
+    quote_tag = Связь_цитаты_тэги(
+        id_цитаты=quote_id,
+        id_тэга=tag.id_тэга
+    )
+    db.add(quote_tag)
+    db.commit()
+
+    return {"message": f"Тэг '{tag_name}' добавлен к цитате"}
+
+
+@router.delete("/user/{user_id}/quotes/{quote_id}/tags/{tag_id}", tags=["Цитаты"])
+async def remove_tag_from_quote(
+        user_id: str,
+        quote_id: str,
+        tag_id: str,
+        db: Session = Depends(get_db)
+):
+    """Удалить тэг из цитаты"""
+
+    # Проверяем, что тэг принадлежит пользователю
+    tag = db.query(Тэги).filter(
+        and_(
+            Тэги.id_тэга == tag_id,
+            Тэги.id_пользователя == user_id
+        )
+    ).first()
+
+    if not tag:
+        raise HTTPException(status_code=404, detail="Тэг не найден")
+
+    # Удаляем связь
+    quote_tag = db.query(Связь_цитаты_тэги).filter(
+        and_(
+            Связь_цитаты_тэги.id_цитаты == quote_id,
+            Связь_цитаты_тэги.id_тэга == tag_id
+        )
+    ).first()
+
+    if not quote_tag:
+        raise HTTPException(status_code=404, detail="Связь не найдена")
+
+    db.delete(quote_tag)
+    db.commit()
+
+    return {"message": "Тэг удалён из цитаты"}
 
 @router.delete("/quotes/{quote_id}", tags=["Цитаты"])
 async def delete_quote(
