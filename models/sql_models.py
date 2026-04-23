@@ -27,6 +27,7 @@ class Аккаунты(Base):
     сессии_статус = relationship("Сессия_статус", back_populates="пользователь", overlaps="пользователь")
     сессии = relationship("Сессии", back_populates="пользователь", overlaps="пользователь")
     цитаты = relationship("Цитаты", back_populates="пользователь", overlaps="пользователь")
+    тэги = relationship("Тэги", back_populates="пользователь")
 
 
 class Авторы(Base):
@@ -250,11 +251,13 @@ class Тэги(Base):
     __tablename__ = 'Тэги'
 
     id_тэга = Column(String(50), primary_key=True)
-    Название = Column(String(100), nullable=False, unique=True)
+    Название = Column(String(100), nullable=False)
     color = Column(String(7), default='#3498db')
     created_at = Column(TIMESTAMP, server_default='CURRENT_TIMESTAMP')
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'))  # 👈 НОВОЕ
 
     связь_цитаты = relationship("Связь_цитаты_тэги", back_populates="тэг", overlaps="тэг")
+    пользователь = relationship("Аккаунты", back_populates="тэги")  # 👈 НОВАЯ СВЯЗЬ
 
 
 class Связь_цитаты_тэги(Base):
