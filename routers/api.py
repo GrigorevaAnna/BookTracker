@@ -1682,6 +1682,81 @@ async def add_tag_to_quote(
     return {"message": f"Тэг '{tag_name}' добавлен к цитате"}
 
 
+@router.put("/user/{user_id}/quotes/{quote_id}", tags=["Цитаты"])
+async def update_quote(
+        user_id: str,
+        quote_id: str,
+        text: Optional[str] = None,
+        page: Optional[int] = None,
+        tags: Optional[List[str]] = None,  # 👈 можно обновить тэги
+        db: Session = Depends(get_db)
+):
+    """
+    Обновить цитату.
+    - Можно изменить текст
+    - Можно изменить страницу
+    - Можно заменить все тэги новым списком
+    """
+
+    # Проверяем, что цитата принадлежит пользователю
+    quote = db.query(Цитаты).filter(
+        and_(
+            Цитаты.id_цитаты == quote_id,
+            Цитаты.id_пользователя == user_id
+        )
+    ).first()
+
+    if not quote:
+        raise HTTPException(status_code=404, detail="Цитата не найдена")
+
+    # 1. Обновляем текст
+    if text is not None:
+        quote.Текст = text
+
+    # 2. Обновляем страницу
+    if page is not None:
+        quote.Страница = page
+
+    # 3. Обновляем тэги (полная замена)
+    if tags is not None:
+        # Удаляем старые связи
+        db.query(Связь_цитаты_тэги).filter(
+            Связь_цитаты_тэги.id_цитаты == quote_id
+        ).delete()
+
+        # Добавляем новые тэги
+        for tag_name in tags:
+            # Ищем или создаём тэг (только для этого пользователя)
+            tag = db.query(Тэги).filter(
+                and_(
+                    Тэги.Название == tag_name,
+                    Тэги.id_пользователя == user_id
+                )
+            ).first()
+
+            if not tag:
+                tag_id = str(uuid.uuid4())[:8]
+                tag = Тэги(
+                    id_тэга=tag_id,
+                    Название=tag_name,
+                    id_пользователя=user_id
+                )
+                db.add(tag)
+                db.flush()
+
+            # Связываем
+            quote_tag = Связь_цитаты_тэги(
+                id_цитаты=quote_id,
+                id_тэга=tag.id_тэга
+            )
+            db.add(quote_tag)
+
+    quote.updated_at = datetime.now()  # если есть такое поле
+    db.commit()
+
+    return {"message": "Цитата обновлена"}
+
+
 @router.delete("/user/{user_id}/quotes/{quote_id}/tags/{tag_id}", tags=["Цитаты"])
 async def remove_tag_from_quote(
         user_id: str,
@@ -1717,6 +1792,7 @@ async def remove_tag_from_quote(
     db.commit()
 
     return {"message": "Тэг удалён из цитаты"}
+
 
 @router.delete("/quotes/{quote_id}", tags=["Цитаты"])
 async def delete_quote(
