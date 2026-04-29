@@ -1821,3 +1821,307 @@ async def delete_quote(
     db.commit()
 
     return {"message": "Цитата удалена"}
+
+
+# ============================================
+# СТАТИСТИКА ПОЛЬЗОВАТЕЛЯ (РАСШИРЕННАЯ)
+# ============================================
+
+@router.get("/user/{user_id}/stats/books-count", tags=["Статистика"])
+def get_books_count(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Метод 1: Сколько книг прочитал пользователь
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Считаем книги со статусом "Прочитано"
+    finished_count = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.Статус == "Прочитано"
+        )
+    ).count()
+
+    return {
+        "user_id": user_id,
+        "finished_books_count": finished_count
+    }
+
+
+@router.get("/user/{user_id}/stats/pages-total", tags=["Статистика"])
+def get_total_pages_read(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Метод 2: Сколько всего страниц прочитал пользователь за всё время
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Суммируем все прочитанные страницы из сессий
+    result = db.query(func.sum(Сессии.pages_read)).filter(
+        Сессии.id_пользователя == user_id
+    ).scalar()
+
+    total_pages = result or 0
+
+    return {
+        "user_id": user_id,
+        "total_pages_read": total_pages
+    }
+
+
+@router.get("/user/{user_id}/stats/time-total", tags=["Статистика"])
+def get_total_reading_time(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Метод 3: Сколько всего часов/минут пользователь читал всё время
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Суммируем все минуты из сессий
+    result = db.query(func.sum(Сессии.duration_minutes)).filter(
+        Сессии.id_пользователя == user_id
+    ).scalar()
+
+    total_minutes = result or 0
+    total_hours = total_minutes // 60
+    remaining_minutes = total_minutes % 60
+
+    return {
+        "user_id": user_id,
+        "total_minutes": total_minutes,
+        "total_hours": total_hours,
+        "total_hours_decimal": round(total_minutes / 60, 1),
+        "formatted": f"{total_hours} ч {remaining_minutes} мин"
+    }
+
+
+@router.get("/user/{user_id}/stats/daily-average", tags=["Статистика"])
+def get_daily_average(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Метод 4: Сколько минут/день пользователь читает (в среднем)
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Получаем все сессии с датами
+    sessions = db.query(Сессии.Дата_начала, Сессии.duration_minutes).filter(
+        Сессии.id_пользователя == user_id
+    ).all()
+
+    if not sessions:
+        return {
+            "user_id": user_id,
+            "average_minutes_per_day": 0,
+            "average_hours_per_day": 0,
+            "days_with_reading": 0,
+            "message": "Нет данных о чтении"
+        }
+
+    # Группируем по дням (уникальные даты)
+    daily_totals = {}
+    for session in sessions:
+        if session.Дата_начала:
+            # Берём только дату (без времени)
+            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            daily_totals[date_str] = daily_totals.get(date_str, 0) + (session.duration_minutes or 0)
+
+    if not daily_totals:
+        return {
+            "user_id": user_id,
+            "average_minutes_per_day": 0,
+            "average_hours_per_day": 0,
+            "days_with_reading": 0
+        }
+
+    # Считаем среднее
+    total_minutes = sum(daily_totals.values())
+    days_count = len(daily_totals)
+    avg_minutes = total_minutes // days_count
+    avg_hours = round(avg_minutes / 60, 1)
+
+    return {
+        "user_id": user_id,
+        "average_minutes_per_day": avg_minutes,
+        "average_hours_per_day": avg_hours,
+        "days_with_reading": days_count,
+        "total_minutes": total_minutes
+    }
+
+
+@router.get("/user/{user_id}/stats/streak", tags=["Статистика"])
+def get_reading_streak(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Метод 5: Сколько дней пользователь читает подряд (текущая серия) и рекорд
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Получаем все уникальные даты сессий
+    sessions = db.query(Сессии.Дата_начала).filter(
+        Сессии.id_пользователя == user_id
+    ).all()
+
+    if not sessions:
+        return {
+            "user_id": user_id,
+            "current_streak": 0,
+            "record_streak": 0,
+            "message": "Нет данных о чтении"
+        }
+
+    # Извлекаем уникальные даты
+    dates = set()
+    for session in sessions:
+        if session.Дата_начала:
+            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            dates.add(date_str)
+
+    # Сортируем даты
+    sorted_dates = sorted(dates)
+
+    # Преобразуем в объекты date
+    from datetime import datetime, timedelta
+    date_objects = [datetime.strptime(d, '%Y-%m-%d').date() for d in sorted_dates]
+
+    # Вычисляем текущую серию (начиная с сегодняшнего дня)
+    today = datetime.now().date()
+    current_streak = 0
+    check_date = today
+
+    while check_date in date_objects:
+        current_streak += 1
+        check_date -= timedelta(days=1)
+
+    # Вычисляем рекордную серию
+    max_streak = 0
+    current = 1
+
+    for i in range(1, len(date_objects)):
+        diff = (date_objects[i] - date_objects[i - 1]).days
+        if diff == 1:
+            current += 1
+        else:
+            max_streak = max(max_streak, current)
+            current = 1
+    max_streak = max(max_streak, current)
+
+    return {
+        "user_id": user_id,
+        "current_streak": current_streak,
+        "record_streak": max_streak,
+        "last_reading_date": str(date_objects[-1]) if date_objects else None
+    }
+
+
+@router.get("/user/{user_id}/stats/all", tags=["Статистика"])
+def get_all_stats(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Получить ВСЮ статистику одним запросом
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # 1. Количество прочитанных книг
+    finished_count = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.Статус == "Прочитано"
+        )
+    ).count()
+
+    # 2. Всего страниц
+    total_pages = db.query(func.sum(Сессии.pages_read)).filter(
+        Сессии.id_пользователя == user_id
+    ).scalar() or 0
+
+    # 3. Всего времени
+    total_minutes = db.query(func.sum(Сессии.duration_minutes)).filter(
+        Сессии.id_пользователя == user_id
+    ).scalar() or 0
+
+    # 4. Среднее в день
+    sessions = db.query(Сессии.Дата_начала, Сессии.duration_minutes).filter(
+        Сессии.id_пользователя == user_id
+    ).all()
+
+    daily_totals = {}
+    for session in sessions:
+        if session.Дата_начала:
+            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            daily_totals[date_str] = daily_totals.get(date_str, 0) + (session.duration_minutes or 0)
+
+    if daily_totals:
+        avg_minutes = sum(daily_totals.values()) // len(daily_totals)
+        avg_hours = round(avg_minutes / 60, 1)
+    else:
+        avg_minutes = 0
+        avg_hours = 0
+
+    # 5. Серии (streak)
+    dates = set()
+    for session in sessions:
+        if session.Дата_начала:
+            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            dates.add(date_str)
+
+    sorted_dates = sorted(dates)
+    from datetime import datetime, timedelta
+    date_objects = [datetime.strptime(d, '%Y-%m-%d').date() for d in sorted_dates] if sorted_dates else []
+
+    # Текущая серия
+    today = datetime.now().date()
+    current_streak = 0
+    check_date = today
+    while check_date in date_objects:
+        current_streak += 1
+        check_date -= timedelta(days=1)
+
+    # Рекордная серия
+    max_streak = 0
+    current = 1
+    for i in range(1, len(date_objects)):
+        diff = (date_objects[i] - date_objects[i - 1]).days
+        if diff == 1:
+            current += 1
+        else:
+            max_streak = max(max_streak, current)
+            current = 1
+    max_streak = max(max_streak, current)
+
+    return {
+        "user_id": user_id,
+        "finished_books": finished_count,
+        "total_pages_read": total_pages,
+        "total_minutes_read": total_minutes,
+        "total_hours_read": round(total_minutes / 60, 1),
+        "average_minutes_per_day": avg_minutes,
+        "average_hours_per_day": avg_hours,
+        "current_streak": current_streak,
+        "record_streak": max_streak,
+        "total_days_with_reading": len(date_objects)
+    }
