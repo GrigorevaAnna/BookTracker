@@ -2245,3 +2245,73 @@ def get_all_stats(
         "record_streak": max_streak,
         "total_days_with_reading": len(date_objects)
     }
+
+
+@router.get("/user/{user_id}/stats/pages-per-day", tags=["Статистика"])
+def get_pages_per_day(
+        user_id: str,
+        days: int = 30,  # количество дней для отображения (по умолчанию 30)
+        db: Session = Depends(get_db)
+):
+    """
+    Метод: сколько страниц в день пользователь прочитал за последние N дней
+    Возвращает массив с данными для графика
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    from datetime import datetime, timedelta
+
+    # Получаем все сессии за последние days дней
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days)
+
+    # Преобразуем даты в строки для сравнения
+    start_date_str = start_date.isoformat()
+    end_date_str = end_date.isoformat()
+
+    # Получаем сессии пользователя
+    sessions = db.query(Сессии).filter(
+        and_(
+            Сессии.id_пользователя == user_id,
+            Сессии.Дата_начала >= start_date_str
+        )
+    ).all()
+
+    # Группируем страницы по дням
+    daily_pages = {}
+    for session in sessions:
+        if session.Дата_начала:
+            # Берём только дату (без времени)
+            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            daily_pages[date_str] = daily_pages.get(date_str, 0) + (session.pages_read or 0)
+
+    # Формируем массив для последних days дней (включая дни с 0)
+    result = []
+    for i in range(days):
+        current_date = (end_date - timedelta(days=days - 1 - i)).isoformat()
+        pages = daily_pages.get(current_date, 0)
+
+        result.append({
+            "date": current_date,
+            "pages": pages
+        })
+
+    # Дополнительная статистика
+    total_pages = sum(daily_pages.values())
+    days_with_reading = len([p for p in daily_pages.values() if p > 0])
+    avg_pages = round(total_pages / days, 1) if days > 0 else 0
+    max_pages = max(daily_pages.values()) if daily_pages else 0
+
+    return {
+        "user_id": user_id,
+        "period_days": days,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "daily_pages": result,  # массив для графика
+        "total_pages": total_pages,
+        "days_with_reading": days_with_reading,
+        "average_pages_per_day": avg_pages,
+        "max_pages_in_one_day": max_pages
+    }
