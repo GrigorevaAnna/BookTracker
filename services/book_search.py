@@ -1,6 +1,27 @@
 # services/book_search.py
 from typing import List, Dict, Any, Optional
 import httpx
+import re
+
+
+def fix_cover_url(url: str) -> str:
+    """Преобразует ссылку Google Books в прямую ссылку на изображение"""
+    if not url:
+        return ""
+
+    # Ссылки Google Books
+    if "books.google.com" in url:
+        # Прямая ссылка на изображение через Google Books API
+        # Извлекаем ID книги из URL
+        if "id=" in url:
+            match = re.search(r'id=([^&]+)', url)
+            if match:
+                book_id = match.group(1)
+                # Используем прямую ссылку Google Books
+                return f"https://books.google.com/books/content?id={book_id}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+
+    # Если ссылка уже прямая, возвращаем как есть
+    return url
 
 
 class CombinedSearchService:
@@ -18,14 +39,13 @@ class CombinedSearchService:
         openlib_results = await self._search_openlibrary(query)
         results.extend(openlib_results)
 
-        # Удаляем дубликаты по ISBN
+        # Удаляем дубликаты по названию и автору
         unique_results = []
-        seen_isbns = set()
+        seen_keys = set()
         for book in results:
-            if book.get("isbn") and book.get("isbn") not in seen_isbns:
-                seen_isbns.add(book.get("isbn"))
-                unique_results.append(book)
-            elif not book.get("isbn"):
+            key = f"{book.get('title', '')}_{book.get('author', '')}"
+            if key not in seen_keys:
+                seen_keys.add(key)
                 unique_results.append(book)
 
         return unique_results
@@ -34,9 +54,10 @@ class CombinedSearchService:
         """Поиск через Google Books API с фильтрацией по автору и названию"""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
+                # Отправляем запрос
                 response = await client.get(
                     "https://www.googleapis.com/books/v1/volumes",
-                    params={"q": query, "maxResults": 30}
+                    params={"q": query, "maxResults": 30}  # берём больше, чтобы потом отфильтровать
                 )
 
                 if response.status_code != 200:
@@ -51,26 +72,30 @@ class CombinedSearchService:
                     title = volume.get("title", "")
                     authors = volume.get("authors", [])
 
-                    # Строгая фильтрация
+                    # Строгая фильтрация: ищем ТОЛЬКО по автору и названию
                     title_match = all(part in title.lower() for part in query_parts)
                     author_match = any(all(part in author.lower() for part in query_parts) for author in authors)
 
+                    # Если запрос совпал с названием ИЛИ с автором — добавляем
                     if title_match or author_match:
-                        # Извлекаем обложку и преобразуем в прямую ссылку
+                        # Извлекаем ISBN
+                        isbn = ""
+                        for identifier in volume.get("industryIdentifiers", []):
+                            if identifier.get("type") in ["ISBN_13", "ISBN_10"]:
+                                isbn = identifier.get("identifier")
+                                break
+
+                        # Извлекаем обложку
                         images = volume.get("imageLinks", {})
                         cover_url = images.get("thumbnail", "")
-                        cover_url = fix_cover_url(cover_url)  # 👈 ПРЕОБРАЗУЕМ
-
-                        # Дополнительно: если нет обложки, пробуем сформировать вручную
-                        if not cover_url and item.get("id"):
-                            cover_url = f"https://books.google.com/books/content?id={item['id']}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+                        cover_url = fix_cover_url(cover_url)  # 👈 ТЕПЕРЬ ФУНКЦИЯ ЕСТЬ
 
                         results.append({
                             "title": title,
                             "author": ", ".join(authors) if authors else "Неизвестный автор",
                             "description": volume.get("description", ""),
                             "pages": volume.get("pageCount", 0),
-                            "isbn": "",
+                            "isbn": isbn,
                             "cover_url": cover_url,
                             "published_date": volume.get("publishedDate", ""),
                             "publisher": volume.get("publisher", ""),
@@ -127,27 +152,6 @@ class CombinedSearchService:
         except Exception as e:
             print(f"OpenLibrary ошибка: {e}")
             return []
-
-
-    def fix_cover_url(url: str) -> str:
-        """Преобразует ссылку Google Books в прямую ссылку на изображение"""
-        if not url:
-            return ""
-
-        # Ссылки Google Books
-        if "books.google.com" in url:
-            # Прямая ссылка на изображение через Google Books API
-            # Извлекаем ID книги из URL
-            if "id=" in url:
-                import re
-                match = re.search(r'id=([^&]+)', url)
-                if match:
-                    book_id = match.group(1)
-                    # Используем прямую ссылку Google Books
-                    return f"https://books.google.com/books/content?id={book_id}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
-
-        # Если ссылка уже прямая, возвращаем как есть
-        return url
 
 
 combined_search = CombinedSearchService()
