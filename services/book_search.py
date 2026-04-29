@@ -34,10 +34,9 @@ class CombinedSearchService:
         """Поиск через Google Books API с фильтрацией по автору и названию"""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # Отправляем запрос
                 response = await client.get(
                     "https://www.googleapis.com/books/v1/volumes",
-                    params={"q": query, "maxResults": 30}  # берём больше, чтобы потом отфильтровать
+                    params={"q": query, "maxResults": 30}
                 )
 
                 if response.status_code != 200:
@@ -45,43 +44,33 @@ class CombinedSearchService:
 
                 data = response.json()
                 results = []
+                query_parts = query.lower().split()
 
                 for item in data.get("items", []):
                     volume = item.get("volumeInfo", {})
                     title = volume.get("title", "")
                     authors = volume.get("authors", [])
-                    description = volume.get("description", "")
 
-                    # ============================================
-                    # СТРОГАЯ ФИЛЬТРАЦИЯ: ищем ТОЛЬКО по автору и названию
-                    # ============================================
-
-                    # Разбиваем запрос на отдельные слова
-                    query_parts = query.lower().split()
-
-                    # Проверяем, есть ли все слова запроса в названии ИЛИ в авторе
+                    # Строгая фильтрация
                     title_match = all(part in title.lower() for part in query_parts)
                     author_match = any(all(part in author.lower() for part in query_parts) for author in authors)
 
-                    # Если запрос совпал с названием ИЛИ с автором — добавляем
                     if title_match or author_match:
-                        # Извлекаем ISBN
-                        isbn = ""
-                        for identifier in volume.get("industryIdentifiers", []):
-                            if identifier.get("type") in ["ISBN_13", "ISBN_10"]:
-                                isbn = identifier.get("identifier")
-                                break
-
-                        # Извлекаем обложку
+                        # Извлекаем обложку и преобразуем в прямую ссылку
                         images = volume.get("imageLinks", {})
                         cover_url = images.get("thumbnail", "")
+                        cover_url = fix_cover_url(cover_url)  # 👈 ПРЕОБРАЗУЕМ
+
+                        # Дополнительно: если нет обложки, пробуем сформировать вручную
+                        if not cover_url and item.get("id"):
+                            cover_url = f"https://books.google.com/books/content?id={item['id']}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
 
                         results.append({
                             "title": title,
                             "author": ", ".join(authors) if authors else "Неизвестный автор",
-                            "description": description,
+                            "description": volume.get("description", ""),
                             "pages": volume.get("pageCount", 0),
-                            "isbn": isbn,
+                            "isbn": "",
                             "cover_url": cover_url,
                             "published_date": volume.get("publishedDate", ""),
                             "publisher": volume.get("publisher", ""),
@@ -89,7 +78,7 @@ class CombinedSearchService:
                             "source": "Google Books"
                         })
 
-                return results[:15]  # возвращаем не больше 15
+                return results[:15]
         except Exception as e:
             print(f"Google Books ошибка: {e}")
             return []
@@ -114,14 +103,10 @@ class CombinedSearchService:
                     title = doc.get("title", "")
                     authors_list = doc.get("author_name", [])
 
-                    # Фильтрация по названию или автору
                     title_match = all(part in title.lower() for part in query_parts)
                     author_match = any(all(part in author.lower() for part in query_parts) for author in authors_list)
 
                     if title_match or author_match:
-                        isbns = doc.get("isbn", [])
-                        isbn = isbns[0] if isbns else ""
-
                         cover_id = doc.get("cover_i", "")
                         cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else ""
 
@@ -130,7 +115,7 @@ class CombinedSearchService:
                             "author": ", ".join(authors_list) if authors_list else "Неизвестный автор",
                             "description": "",
                             "pages": doc.get("number_of_pages_median", 0),
-                            "isbn": isbn,
+                            "isbn": "",
                             "cover_url": cover_url,
                             "published_date": str(doc.get("first_publish_year", "")),
                             "publisher": doc.get("publisher", [""])[0] if doc.get("publisher") else "",
@@ -142,6 +127,27 @@ class CombinedSearchService:
         except Exception as e:
             print(f"OpenLibrary ошибка: {e}")
             return []
+
+
+    def fix_cover_url(url: str) -> str:
+        """Преобразует ссылку Google Books в прямую ссылку на изображение"""
+        if not url:
+            return ""
+
+        # Ссылки Google Books
+        if "books.google.com" in url:
+            # Прямая ссылка на изображение через Google Books API
+            # Извлекаем ID книги из URL
+            if "id=" in url:
+                import re
+                match = re.search(r'id=([^&]+)', url)
+                if match:
+                    book_id = match.group(1)
+                    # Используем прямую ссылку Google Books
+                    return f"https://books.google.com/books/content?id={book_id}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
+
+        # Если ссылка уже прямая, возвращаем как есть
+        return url
 
 
 combined_search = CombinedSearchService()
