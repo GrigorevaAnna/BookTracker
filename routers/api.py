@@ -1418,6 +1418,126 @@ def get_cover(book_id: str, db: Session = Depends(get_db)):
 # ПОИСК КНИГ (Внешние API)
 # ============================================
 
+
+@router.get("/search/unified", tags=["Поиск книг"])
+async def unified_book_search(
+        query: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Единый поиск книг:
+    1. Сначала ищет в локальной БД
+    2. Потом во внешних API (Google Books, OpenLibrary, Apple iTunes)
+    3. Объединяет результаты (локальные — первыми)
+    4. Возвращает в формате, совместимом с КнигаBase
+    """
+    if not query or len(query) < 2:
+        return {"found": 0, "local": [], "external": [], "message": "Запрос слишком короткий"}
+
+    from datetime import datetime
+
+    # ============================================
+    # 1. ПОИСК В ЛОКАЛЬНОЙ БАЗЕ ДАННЫХ
+    # ============================================
+    local_books = []
+
+    # Ищем по названию или автору
+    search_pattern = f"%{query}%"
+    db_books = db.query(Книги).filter(
+        or_(
+            Книги.Название.ilike(search_pattern),
+            Книги.Автор.ilike(search_pattern)
+        )
+    ).limit(20).all()
+
+    for book in db_books:
+        # Получаем авторов для книги
+        авторы_список = []
+        содержание = db.query(Содержание).filter(
+            Содержание.id_книги == book.id_книги
+        ).all()
+        for с in содержание:
+            труд = db.query(Труд).filter(
+                Труд.id_произведения == с.id_произведения
+            ).all()
+            for t in труд:
+                автор = db.query(Авторы).filter(
+                    Авторы.id_автора == t.id_автора
+                ).first()
+                if автор:
+                    автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
+                    авторы_список.append(автор_name)
+
+        # Конвертируем в формат, совместимый с КнигаBase
+        local_books.append({
+            "id_книги": book.id_книги,
+            "Название": book.Название,
+            "Автор": ", ".join(авторы_список) if авторы_список else book.Автор,
+            "ISBN": book.ISBN or "",
+            "Количество_страниц": book.Количество_страниц,
+            "id_типа_книги": book.id_типа_книги,
+            "Язык": book.Язык or "Русский",
+            "Фото_обложки": book.Фото_обложки or "",
+            "Описание": book.Описание or "",
+            "Жанр": book.Жанр or "",
+            "Штрих_код": book.Штрих_код or "",
+            "Серия_книг": book.Серия_книг,
+            "год_издания": book.год_издания or "",
+            "издательство": book.издательство or "",
+            "source": "local"
+        })
+
+    # ============================================
+    # 2. ПОИСК ВО ВНЕШНИХ API
+    # ============================================
+    external_books = []
+
+    # Поиск через Google Books, OpenLibrary, Apple iTunes
+    external_results = await combined_search.search_all(query, db)
+
+    # ID уже найденных локальных книг (чтобы не дублировать)
+    local_isbns = set()
+    for book in db_books:
+        if book.ISBN:
+            local_isbns.add(book.ISBN)
+
+    for result in external_results:
+        # Пропускаем дубликаты (если книга уже есть в локальной БД)
+        if result.get("isbn") and result.get("isbn") in local_isbns:
+            continue
+
+        # Конвертируем внешний результат в формат КнигаBase
+        external_books.append({
+            "id_книги": None,  # Внешние книги не имеют ID в нашей БД
+            "Название": result.get("title", ""),
+            "Автор": result.get("author", ""),
+            "ISBN": result.get("isbn", ""),
+            "Количество_страниц": result.get("pages", 0),
+            "id_типа_книги": None,
+            "Язык": result.get("language", "Русский"),
+            "Фото_обложки": result.get("cover_url", ""),
+            "Описание": result.get("description", ""),
+            "Жанр": "",
+            "Штрих_код": "",
+            "Серия_книг": False,
+            "год_издания": result.get("published_date", ""),
+            "издательство": result.get("publisher", ""),
+            "source": result.get("source", "external")
+        })
+
+    # ============================================
+    # 3. ФОРМИРУЕМ ОТВЕТ
+    # ============================================
+    return {
+        "found": len(local_books) + len(external_books),
+        "query": query,
+        "local": local_books,  # сначала локальные
+        "external": external_books,  # потом внешние
+        "local_count": len(local_books),
+        "external_count": len(external_books)
+    }
+
+
 @router.get("/search/combined", tags=["Поиск книг"])
 async def combined_book_search(
         query: str,
