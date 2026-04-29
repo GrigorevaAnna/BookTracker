@@ -51,13 +51,12 @@ class CombinedSearchService:
         return unique_results
 
     async def _search_google_books(self, query: str) -> List[Dict[str, Any]]:
-        """Поиск через Google Books API с фильтрацией по автору и названию"""
+        """Поиск через Google Books API"""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # Отправляем запрос
                 response = await client.get(
                     "https://www.googleapis.com/books/v1/volumes",
-                    params={"q": query, "maxResults": 30}  # берём больше, чтобы потом отфильтровать
+                    params={"q": query, "maxResults": 30}
                 )
 
                 if response.status_code != 200:
@@ -65,19 +64,31 @@ class CombinedSearchService:
 
                 data = response.json()
                 results = []
-                query_parts = query.lower().split()
 
                 for item in data.get("items", []):
                     volume = item.get("volumeInfo", {})
                     title = volume.get("title", "")
                     authors = volume.get("authors", [])
+                    description = volume.get("description", "")
 
-                    # Строгая фильтрация: ищем ТОЛЬКО по автору и названию
-                    title_match = all(part in title.lower() for part in query_parts)
-                    author_match = any(all(part in author.lower() for part in query_parts) for author in authors)
+                    # ============================================
+                    # УЛУЧШЕННАЯ ФИЛЬТРАЦИЯ
+                    # ============================================
+                    query_lower = query.lower()
+                    query_words = query_lower.split()
 
-                    # Если запрос совпал с названием ИЛИ с автором — добавляем
-                    if title_match or author_match:
+                    # Проверяем, содержит ли название все слова запроса
+                    title_match = all(word in title.lower() for word in query_words)
+
+                    # Проверяем, содержит ли автор все слова запроса
+                    author_str = ", ".join(authors).lower()
+                    author_match = all(word in author_str for word in query_words)
+
+                    # Проверяем, является ли запрос отдельным словом в авторе
+                    single_word_match = len(query_words) == 1 and query_lower in author_str
+
+                    # Если запрос совпал с названием, автором или является частью имени автора
+                    if title_match or author_match or single_word_match:
                         # Извлекаем ISBN
                         isbn = ""
                         for identifier in volume.get("industryIdentifiers", []):
@@ -88,12 +99,15 @@ class CombinedSearchService:
                         # Извлекаем обложку
                         images = volume.get("imageLinks", {})
                         cover_url = images.get("thumbnail", "")
-                        cover_url = fix_cover_url(cover_url)  # 👈 ТЕПЕРЬ ФУНКЦИЯ ЕСТЬ
+                        if cover_url:
+                            cover_url = fix_cover_url(cover_url)
+                        elif item.get("id"):
+                            cover_url = f"https://books.google.com/books/content?id={item['id']}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
 
                         results.append({
                             "title": title,
                             "author": ", ".join(authors) if authors else "Неизвестный автор",
-                            "description": volume.get("description", ""),
+                            "description": description,
                             "pages": volume.get("pageCount", 0),
                             "isbn": isbn,
                             "cover_url": cover_url,
@@ -103,13 +117,21 @@ class CombinedSearchService:
                             "source": "Google Books"
                         })
 
-                return results[:15]
+                # Возвращаем уникальные результаты (без дубликатов по названию)
+                seen_titles = set()
+                unique_results = []
+                for r in results:
+                    if r["title"].lower() not in seen_titles:
+                        seen_titles.add(r["title"].lower())
+                        unique_results.append(r)
+
+                return unique_results[:15]
         except Exception as e:
             print(f"Google Books ошибка: {e}")
             return []
 
     async def _search_openlibrary(self, query: str) -> List[Dict[str, Any]]:
-        """Поиск через OpenLibrary API с фильтрацией по автору и названию"""
+        """Поиск через OpenLibrary API"""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
@@ -122,16 +144,19 @@ class CombinedSearchService:
 
                 data = response.json()
                 results = []
-                query_parts = query.lower().split()
+                query_lower = query.lower()
+                query_words = query_lower.split()
 
                 for doc in data.get("docs", []):
                     title = doc.get("title", "")
                     authors_list = doc.get("author_name", [])
 
-                    title_match = all(part in title.lower() for part in query_parts)
-                    author_match = any(all(part in author.lower() for part in query_parts) for author in authors_list)
+                    title_match = all(word in title.lower() for word in query_words)
+                    author_str = ", ".join(authors_list).lower()
+                    author_match = all(word in author_str for word in query_words)
+                    single_word_match = len(query_words) == 1 and query_lower in author_str
 
-                    if title_match or author_match:
+                    if title_match or author_match or single_word_match:
                         cover_id = doc.get("cover_i", "")
                         cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else ""
 
@@ -148,7 +173,14 @@ class CombinedSearchService:
                             "source": "OpenLibrary"
                         })
 
-                return results[:15]
+                seen_titles = set()
+                unique_results = []
+                for r in results:
+                    if r["title"].lower() not in seen_titles:
+                        seen_titles.add(r["title"].lower())
+                        unique_results.append(r)
+
+                return unique_results[:15]
         except Exception as e:
             print(f"OpenLibrary ошибка: {e}")
             return []
