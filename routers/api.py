@@ -1476,12 +1476,25 @@ async def add_quote(
         book_id: str,
         text: str,
         page: Optional[int] = None,
-        tags: Optional[List[str]] = None,  # список названий тэгов
+        tags: Optional[List[str]] = None,
         db: Session = Depends(get_db)
 ):
     """Добавить цитату из книги с персональными тэгами"""
-    # ... проверки книги и произведения ...
 
+    # 1. Проверяем, существует ли книга
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    # 2. Получаем произведение через связь Содержание
+    content = db.query(Содержание).filter(
+        Содержание.id_книги == book_id
+    ).first()
+
+    if not content:
+        raise HTTPException(status_code=404, detail="Произведение не найдено")
+
+    # 3. Создаём цитату
     quote_id = str(uuid.uuid4())[:8]
     new_quote = Цитаты(
         id_цитаты=quote_id,
@@ -1494,7 +1507,7 @@ async def add_quote(
     db.add(new_quote)
     db.flush()
 
-    # Добавляем тэги (только для этого пользователя)
+    # 4. Добавляем тэги (только для этого пользователя)
     if tags:
         for tag_name in tags:
             # Ищем тэг у этого пользователя
@@ -1512,7 +1525,7 @@ async def add_quote(
                     id_тэга=tag_id,
                     Название=tag_name,
                     id_пользователя=user_id,
-                    color=f"#{hash(tag_name) % 0xFFFFFF:06x}"  # случайный цвет
+                    color=f"#{hash(tag_name) % 0xFFFFFF:06x}"
                 )
                 db.add(tag)
                 db.flush()
