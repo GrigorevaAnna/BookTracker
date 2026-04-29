@@ -1427,21 +1427,21 @@ async def unified_book_search(
     """
     Единый поиск книг:
     1. Сначала ищет в локальной БД
-    2. Потом во внешних API (Google Books, OpenLibrary, Apple iTunes)
-    3. Объединяет результаты (локальные — первыми)
-    4. Возвращает в формате, совместимом с КнигаBase
+    2. Потом во внешних API
+    3. Объединяет результаты в один массив
+    4. Возвращает в формате, совместимом с Kotlin Book
     """
     if not query or len(query) < 2:
-        return {"found": 0, "local": [], "external": [], "message": "Запрос слишком короткий"}
+        return []  # 👈 возвращаем пустой массив, если запрос короткий
 
     from datetime import datetime
+    import uuid
+
+    result_books = []  # 👈 ОДИН МАССИВ ДЛЯ ВСЕХ РЕЗУЛЬТАТОВ
 
     # ============================================
     # 1. ПОИСК В ЛОКАЛЬНОЙ БАЗЕ ДАННЫХ
     # ============================================
-    local_books = []
-
-    # Ищем по названию или автору
     search_pattern = f"%{query}%"
     db_books = db.query(Книги).filter(
         or_(
@@ -1450,8 +1450,14 @@ async def unified_book_search(
         )
     ).limit(20).all()
 
+    # Множество для отслеживания дубликатов по ISBN
+    seen_isbns = set()
+
     for book in db_books:
-        # Получаем авторов для книги
+        if book.ISBN:
+            seen_isbns.add(book.ISBN)
+
+        # Получаем авторов
         авторы_список = []
         содержание = db.query(Содержание).filter(
             Содержание.id_книги == book.id_книги
@@ -1468,74 +1474,50 @@ async def unified_book_search(
                     автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
                     авторы_список.append(автор_name)
 
-        # Конвертируем в формат, совместимый с КнигаBase
-        local_books.append({
-            "id_книги": book.id_книги,
-            "Название": book.Название,
-            "Автор": ", ".join(авторы_список) if авторы_список else book.Автор,
-            "ISBN": book.ISBN or "",
-            "Количество_страниц": book.Количество_страниц,
-            "id_типа_книги": book.id_типа_книги,
-            "Язык": book.Язык or "Русский",
-            "Фото_обложки": book.Фото_обложки or "",
-            "Описание": book.Описание or "",
-            "Жанр": book.Жанр or "",
-            "Штрих_код": book.Штрих_код or "",
-            "Серия_книг": book.Серия_книг,
-            "год_издания": book.год_издания or "",
-            "издательство": book.издательство or "",
-            "source": "local"
+        # Формируем объект в формате Kotlin Book
+        result_books.append({
+            "id": book.id_книги,
+            "title": book.Название,
+            "author": ", ".join(авторы_список) if авторы_список else book.Автор,
+            "coverUrl": book.Фото_обложки or "",
+            "description": book.Описание or "",
+            "pages": book.Количество_страниц,
+            "genre": book.Жанр or "",
+            "isbn": book.ISBN or "",
+            "publishedDate": book.год_издания or "",
+            "publisher": book.издательство or "",
+            "source": "local"  # ❗ ДОПОЛНИТЕЛЬНОЕ ПОЛЕ (фронт его может игнорировать)
         })
 
     # ============================================
     # 2. ПОИСК ВО ВНЕШНИХ API
     # ============================================
-    external_books = []
-
-    # Поиск через Google Books, OpenLibrary, Apple iTunes
     external_results = await combined_search.search_all(query, db)
 
-    # ID уже найденных локальных книг (чтобы не дублировать)
-    local_isbns = set()
-    for book in db_books:
-        if book.ISBN:
-            local_isbns.add(book.ISBN)
-
     for result in external_results:
-        # Пропускаем дубликаты (если книга уже есть в локальной БД)
-        if result.get("isbn") and result.get("isbn") in local_isbns:
+        # Пропускаем дубликаты
+        if result.get("isbn") and result.get("isbn") in seen_isbns:
             continue
 
-        # Конвертируем внешний результат в формат КнигаBase
-        external_books.append({
-            "id_книги": None,  # Внешние книги не имеют ID в нашей БД
-            "Название": result.get("title", ""),
-            "Автор": result.get("author", ""),
-            "ISBN": result.get("isbn", ""),
-            "Количество_страниц": result.get("pages", 0),
-            "id_типа_книги": None,
-            "Язык": result.get("language", "Русский"),
-            "Фото_обложки": result.get("cover_url", ""),
-            "Описание": result.get("description", ""),
-            "Жанр": "",
-            "Штрих_код": "",
-            "Серия_книг": False,
-            "год_издания": result.get("published_date", ""),
-            "издательство": result.get("publisher", ""),
-            "source": result.get("source", "external")
+        # Формируем объект в формате Kotlin Book
+        result_books.append({
+            "id": str(uuid.uuid4())[:8],  # временный ID для внешней книги
+            "title": result.get("title", ""),
+            "author": result.get("author", ""),
+            "coverUrl": result.get("cover_url", ""),
+            "description": result.get("description", ""),
+            "pages": result.get("pages", 0),
+            "genre": "",
+            "isbn": result.get("isbn", ""),
+            "publishedDate": result.get("published_date", ""),
+            "publisher": result.get("publisher", ""),
+            "source": result.get("source", "external")  # ❗ ДОПОЛНИТЕЛЬНОЕ ПОЛЕ
         })
 
     # ============================================
-    # 3. ФОРМИРУЕМ ОТВЕТ
+    # 3. ВОЗВРАЩАЕМ ПРОСТОЙ МАССИВ
     # ============================================
-    return {
-        "found": len(local_books) + len(external_books),
-        "query": query,
-        "local": local_books,  # сначала локальные
-        "external": external_books,  # потом внешние
-        "local_count": len(local_books),
-        "external_count": len(external_books)
-    }
+    return result_books
 
 
 @router.get("/search/combined", tags=["Поиск книг"])
