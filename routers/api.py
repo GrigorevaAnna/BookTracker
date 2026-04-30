@@ -11,7 +11,7 @@ import httpx
 from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
 from models.pydantic_models import normalize_language
-from services.google_drive import  download_and_upload_cover
+from services.google_drive import download_and_upload_cover
 
 from database.database import get_db
 from models.sql_models import (
@@ -915,8 +915,6 @@ def get_user_wishlist(
 
     return result
 
-
-from services.google_drive import download_and_upload_cover
 
 @router.post("/user/{user_id}/add-to-wishlist", tags=["Вишлист"])
 async def add_to_wishlist(

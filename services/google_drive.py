@@ -99,7 +99,10 @@ async def download_and_upload_cover(book_id: str, cover_url: str) -> str:
     Скачивает обложку по URL и загружает на Google Drive
     Возвращает прямую ссылку на Google Drive
     """
+    print(f"📥 Скачиваю обложку для книги {book_id} с URL: {cover_url[:100]}...")  # 👈 ДОБАВЬТЕ
+
     if not cover_url:
+        print("⚠️ cover_url пустой")
         return ""
 
     try:
