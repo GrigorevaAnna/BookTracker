@@ -23,22 +23,37 @@ FOLDER_ID = "1r1tWqHZD4-sPe6ZBTbXlOcig6AMk5Swh"  # 👈 ВСТАВЬТЕ ВАШ 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
-def get_authenticated_service():
+def get_authenticated_service(force_reauth: bool = False):
     """Получение аутентифицированного сервиса через OAuth"""
     creds = None
 
+    # Принудительная переавторизация
+    if force_reauth and os.path.exists(TOKEN_PICKLE):
+        os.remove(TOKEN_PICKLE)
+
     # Загружаем сохранённый токен
-    if os.path.exists(TOKEN_PICKLE):
+    if os.path.exists(TOKEN_PICKLE) and not force_reauth:
         with open(TOKEN_PICKLE, "rb") as token:
             creds = pickle.load(token)
 
     # Если токена нет или он недействителен
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                print("✅ Токен обновлён")
+            except Exception as e:
+                print(f"⚠️ Ошибка обновления токена: {e}")
+                print("🔄 Получаем новый токен...")
+                # Удаляем старый токен и получаем новый
+                if os.path.exists(TOKEN_PICKLE):
+                    os.remove(TOKEN_PICKLE)
+                creds = None
+
+        if not creds:
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
+            print("✅ Получен новый токен")
 
         # Сохраняем токен
         with open(TOKEN_PICKLE, "wb") as token:
@@ -51,47 +66,58 @@ async def upload_cover_to_google_drive(file: UploadFile, book_id: str) -> str:
     """
     Загружает обложку на Google Drive и возвращает прямую ссылку
     """
-    try:
-        service = get_authenticated_service()
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            service = get_authenticated_service(force_reauth=(attempt > 0))
 
-        file_extension = Path(file.filename).suffix.lower()
-        unique_filename = f"{book_id}_{uuid.uuid4()}{file_extension}"
+            file_extension = Path(file.filename).suffix.lower()
+            unique_filename = f"{book_id}_{uuid.uuid4()}{file_extension}"
 
-        file_content = await file.read()
+            # Важно: нужно прочитать файл заново, так как после первой попытки file.file может быть прочитан
+            if hasattr(file, 'file') and hasattr(file.file, 'seek'):
+                await file.seek(0)  # Перемещаемся в начало файла
 
-        media = MediaIoBaseUpload(
-            io.BytesIO(file_content),
-            mimetype=file.content_type or "image/jpeg",
-            resumable=True
-        )
+            file_content = await file.read()
 
-        file_metadata = {
-            "name": unique_filename,
-            "parents": [FOLDER_ID]
-        }
+            media = MediaIoBaseUpload(
+                io.BytesIO(file_content),
+                mimetype=file.content_type or "image/jpeg",
+                resumable=True
+            )
 
-        uploaded_file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields="id"
-        ).execute()
+            file_metadata = {
+                "name": unique_filename,
+                "parents": [FOLDER_ID]
+            }
 
-        file_id = uploaded_file.get("id")
+            uploaded_file = service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields="id"
+            ).execute()
 
-        # Делаем файл публичным
-        service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"}
-        ).execute()
+            file_id = uploaded_file.get("id")
 
-        # Прямая ссылка на файл
-        direct_link = f"https://drive.google.com/uc?export=view&id={file_id}"
+            # Делаем файл публичным
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"}
+            ).execute()
 
-        return direct_link
+            # Прямая ссылка на файл
+            direct_link = f"https://drive.google.com/uc?export=view&id={file_id}"
+            print(f"✅ Файл загружен на Google Drive: {direct_link}")
 
-    except Exception as e:
-        print(f"Ошибка при загрузке на Google Drive: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка загрузки: {str(e)}")
+            return direct_link
+
+        except Exception as e:
+            print(f"❌ Попытка {attempt + 1} не удалась: {e}")
+            if attempt == max_retries - 1:
+                raise HTTPException(status_code=500, detail=f"Ошибка загрузки: {str(e)}")
+            print("🔄 Повторяем попытку...")
+            continue
+
 
 
 async def download_and_upload_cover(book_id: str, cover_url: str) -> str:
