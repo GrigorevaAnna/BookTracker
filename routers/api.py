@@ -538,25 +538,38 @@ async def remove_book_from_user(
     }
 
 
+from fastapi import Request
+
 @router.post("/user/{user_id}/add-book", tags=["Библиотека"])
 async def add_book_to_user(
         user_id: str,
-        title: str,
-        author: str,
-        description: Optional[str] = None,
-        genre: Optional[str] = None,
-        pages: Optional[int] = None,
-        isbn: Optional[str] = None,
-        cover_url: Optional[str] = None,
-        coverUrl: Optional[str] = None,
-        cover_file: Optional[UploadFile] = None,
-        language: Optional[str] = None,
-        db: Session = Depends(get_db)
+        request: Request,  # 👈 Добавляем request
+        db: Session = Depends(get_db),
+        title: Optional[str] = Form(None),
+        author: Optional[str] = Form(None),
+        description: Optional[str] = Form(None),
+        genre: Optional[str] = Form(None),
+        pages: Optional[int] = Form(None),
+        isbn: Optional[str] = Form(None),
+        cover_url: Optional[str] = Form(None),
+        cover_file: Optional[UploadFile] = File(None),
+        language: Optional[str] = Form(None),
 ):
+    # Если данные пришли как JSON, берём оттуда
+    content_type = request.headers.get("content-type", "")
 
-    # Если cover_url пустой, пробуем coverUrl
-    if not cover_url and coverUrl:
-        cover_url = coverUrl
+    if "application/json" in content_type:
+        data = await request.json()
+        title = data.get("title", "")
+        author = data.get("author", "")
+        cover_url = data.get("cover_url", cover_url)
+        isbn = data.get("isbn", isbn)
+        pages = data.get("pages", pages)
+        description = data.get("description", description)
+        genre = data.get("genre", genre)
+        language = data.get("language", language)
+
+    print(f"🔍 cover_url: {cover_url}")
 
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
     print(f"🔍 add_book_to_user вызван с cover_url: {cover_url}")
