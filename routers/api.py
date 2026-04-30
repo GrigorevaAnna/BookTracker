@@ -553,6 +553,8 @@ async def add_book_to_user(
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
+    print(f"🔍 add_book_to_user вызван с cover_url: {cover_url}")
+    """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
@@ -581,10 +583,11 @@ async def add_book_to_user(
         )
         db.add(new_work)
 
-        # 👇 СОХРАНЯЕМ ОБЛОЖКУ НА GOOGLE DRIVE
         final_cover_url = cover_url
         if cover_url:
+            print(f"🔄 Вызываю download_and_upload_cover для {book_id}")  # 👈 ДОБАВЬТЕ
             final_cover_url = await download_and_upload_cover(book_id, cover_url)
+            print(f"🔄 Результат: {final_cover_url[:80] if final_cover_url else 'None'}")  # 👈 ДОБАВЬТЕ
 
         new_book = Книги(
             id_книги=book_id,
