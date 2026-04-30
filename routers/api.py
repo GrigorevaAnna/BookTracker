@@ -548,10 +548,16 @@ async def add_book_to_user(
         pages: Optional[int] = None,
         isbn: Optional[str] = None,
         cover_url: Optional[str] = None,
+        coverUrl: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
         language: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
+
+    # Если cover_url пустой, пробуем coverUrl
+    if not cover_url and coverUrl:
+        cover_url = coverUrl
+
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
     print(f"🔍 add_book_to_user вызван с cover_url: {cover_url}")
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
