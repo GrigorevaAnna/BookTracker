@@ -11,6 +11,7 @@ import httpx
 from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
 from models.pydantic_models import normalize_language
+from services.google_drive import download_and_upload_cover
 
 from database.database import get_db
 from models.sql_models import (
@@ -580,6 +581,11 @@ async def add_book_to_user(
         )
         db.add(new_work)
 
+        # 👇 СОХРАНЯЕМ ОБЛОЖКУ НА GOOGLE DRIVE
+        final_cover_url = cover_url
+        if cover_url:
+            final_cover_url = await download_and_upload_cover(book_id, cover_url)
+
         new_book = Книги(
             id_книги=book_id,
             Название=title.strip(),
@@ -588,7 +594,7 @@ async def add_book_to_user(
             Описание=description or "",
             Жанр=genre or "",
             ISBN=isbn or "",
-            Фото_обложки=cover_url or "",
+            Фото_обложки=final_cover_url,  # 👈 ссылка на Google Drive
             Язык=language or "Русский"
         )
         db.add(new_book)
@@ -634,6 +640,12 @@ async def add_book_to_user(
             Содержание.id_книги == existing_book.id_книги
         ).first()
         created_work_id = content.id_произведения if content else None
+
+        # 👇 Если у книги нет обложки, но есть внешняя ссылка — сохраняем
+        if cover_url and not existing_book.Фото_обложки:
+            final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
+            existing_book.Фото_обложки = final_cover_url
+            db.commit()
 
         if cover_file and not existing_book.Фото_данные:
             cover_content = await cover_file.read()

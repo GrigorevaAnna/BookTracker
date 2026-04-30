@@ -9,6 +9,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import io
 import pickle
+import httpx
+import tempfile
 
 # Путь к файлу с OAuth credentials
 CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), "oauth-credentials.json")
@@ -90,3 +92,55 @@ async def upload_cover_to_google_drive(file: UploadFile, book_id: str) -> str:
     except Exception as e:
         print(f"Ошибка при загрузке на Google Drive: {e}")
         raise HTTPException(status_code=500, detail=f"Ошибка загрузки: {str(e)}")
+
+
+async def download_and_upload_cover(book_id: str, cover_url: str) -> str:
+    """
+    Скачивает обложку по URL и загружает на Google Drive
+    Возвращает прямую ссылку на Google Drive
+    """
+    if not cover_url:
+        return ""
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(cover_url)
+            if response.status_code != 200:
+                return cover_url
+
+            content = response.content
+            content_type = response.headers.get("content-type", "image/jpeg")
+
+            # Определяем расширение
+            ext = "jpg"
+            if "png" in content_type:
+                ext = "png"
+            elif "gif" in content_type:
+                ext = "gif"
+            elif "webp" in content_type:
+                ext = "webp"
+
+            # Сохраняем во временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            # Загружаем на Google Drive
+            from fastapi import UploadFile
+            from io import BytesIO
+
+            file_obj = BytesIO(content)
+            upload_file = UploadFile(filename=f"{book_id}.{ext}", file=file_obj)
+            upload_file.content_type = content_type
+
+            # Загружаем на Google Drive
+            new_cover_url = await upload_cover_to_google_drive(upload_file, book_id)
+
+            # Удаляем временный файл
+            os.unlink(tmp_path)
+
+            return new_cover_url
+
+    except Exception as e:
+        print(f"Ошибка при сохранении обложки на Google Drive: {e}")
+        return cover_url
