@@ -99,16 +99,16 @@ async def download_and_upload_cover(book_id: str, cover_url: str) -> str:
     Скачивает обложку по URL и загружает на Google Drive
     Возвращает прямую ссылку на Google Drive
     """
-    print(f"📥 Скачиваю обложку для книги {book_id} с URL: {cover_url[:100]}...")  # 👈 ДОБАВЬТЕ
-
     if not cover_url:
-        print("⚠️ cover_url пустой")
         return ""
 
+    print(f"📥 Скачиваю обложку для книги {book_id}: {cover_url[:80]}...")
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(cover_url)
             if response.status_code != 200:
+                print(f"❌ Не удалось скачать: статус {response.status_code}")
                 return cover_url
 
             content = response.content
@@ -123,27 +123,29 @@ async def download_and_upload_cover(book_id: str, cover_url: str) -> str:
             elif "webp" in content_type:
                 ext = "webp"
 
-            # Сохраняем во временный файл
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}") as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
-            # Загружаем на Google Drive
-            from fastapi import UploadFile
+            # Создаём UploadFile напрямую из байтов
             from io import BytesIO
-
             file_obj = BytesIO(content)
-            upload_file = UploadFile(filename=f"{book_id}.{ext}", file=file_obj)
-            upload_file.content_type = content_type
+
+            # Создаём объект, похожий на UploadFile
+            class FakeUploadFile:
+                def __init__(self, filename, content, content_type):
+                    self.filename = filename
+                    self.file = BytesIO(content)
+                    self.content_type = content_type
+
+                async def read(self):
+                    return self.file.getvalue()
+
+            upload_file = FakeUploadFile(f"{book_id}.{ext}", content, content_type)
 
             # Загружаем на Google Drive
             new_cover_url = await upload_cover_to_google_drive(upload_file, book_id)
-
-            # Удаляем временный файл
-            os.unlink(tmp_path)
-
+            print(f"✅ Обложка загружена на Google Drive: {new_cover_url[:80]}...")
             return new_cover_url
 
     except Exception as e:
-        print(f"Ошибка при сохранении обложки на Google Drive: {e}")
+        print(f"❌ Ошибка при сохранении обложки на Google Drive: {e}")
+        import traceback
+        traceback.print_exc()
         return cover_url
