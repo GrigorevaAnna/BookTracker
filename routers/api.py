@@ -10,6 +10,7 @@ import httpx
 
 from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
+from models.pydantic_models import normalize_language
 
 from database.database import get_db
 from models.sql_models import (
@@ -26,6 +27,40 @@ from models.pydantic_models import (
 
 
 router = APIRouter(prefix="/api", tags=["api"])
+
+
+def normalize_language(lang: str) -> str:
+    """Преобразует код языка в читаемый вид"""
+    if not lang:
+        return "Русский"
+
+    lang_lower = lang.lower()
+
+    language_map = {
+        "ru": "Русский",
+        "rus": "Русский",
+        "en": "Английский",
+        "eng": "Английский",
+        "fr": "Французский",
+        "fre": "Французский",
+        "de": "Немецкий",
+        "ger": "Немецкий",
+        "es": "Испанский",
+        "spa": "Испанский",
+        "it": "Итальянский",
+        "ita": "Итальянский",
+        "zh": "Китайский",
+        "chi": "Китайский",
+        "ja": "Японский",
+        "jp": "Японский",
+        "ko": "Корейский",
+        "kor": "Корейский"
+    }
+
+    return language_map.get(lang_lower, lang.capitalize() if lang else "Русский")
+
+
+
 
 
 # ============================================
@@ -171,7 +206,8 @@ def get_user_books(
             genre=книга.Жанр or "",
             isbn=книга.ISBN or "",
             publishedDate=книга.год_издания or "",
-            publisher=книга.издательство or ""
+            publisher=книга.издательство or "",
+            language=книга.Язык or "Русский"
         )
 
         kotlin_user_book = KotlinUserBook(
@@ -512,6 +548,7 @@ async def add_book_to_user(
         isbn: Optional[str] = None,
         cover_url: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
+        language: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
@@ -551,7 +588,8 @@ async def add_book_to_user(
             Описание=description or "",
             Жанр=genre or "",
             ISBN=isbn or "",
-            Фото_обложки=cover_url or ""
+            Фото_обложки=cover_url or "",
+            Язык=language or "Русский"
         )
         db.add(new_book)
 
@@ -650,6 +688,7 @@ async def add_to_library(
         isbn: Optional[str] = None,
         cover_url: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
+        language: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в библиотеку со статусом 'Хочу прочитать'"""
@@ -689,7 +728,8 @@ async def add_to_library(
             Описание=description or "",
             Жанр=genre or "",
             ISBN=isbn or "",
-            Фото_обложки=cover_url or ""
+            Фото_обложки=cover_url or "",
+            Язык=language or "Русский"
         )
         db.add(new_book)
 
@@ -821,7 +861,8 @@ def get_user_wishlist(
             genre=книга.Жанр or "",
             isbn=книга.ISBN or "",
             publishedDate=книга.год_издания or "",
-            publisher=книга.издательство or ""
+            publisher=книга.издательство or "",
+            language=книга.Язык or "Русский"
         )
 
         kotlin_user_book = KotlinUserBook(
@@ -856,6 +897,7 @@ async def add_to_wishlist(
         isbn: Optional[str] = None,
         cover_url: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
+        language: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
@@ -894,7 +936,8 @@ async def add_to_wishlist(
             Количество_страниц=pages or 0,
             Описание=description or "",
             ISBN=isbn or "",
-            Фото_обложки=cover_url or ""
+            Фото_обложки=cover_url or "",
+            Язык=language or "Русский"
         )
         db.add(new_book)
 
@@ -1117,7 +1160,8 @@ def get_all_books(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
             genre=книга.Жанр or "",
             isbn=книга.ISBN or "",
             publishedDate=книга.год_издания or "",
-            publisher=книга.издательство or ""
+            publisher=книга.издательство or "",
+            language=книга.Язык or "Русский"
         )
         result.append(kotlin_book)
 
@@ -1126,11 +1170,12 @@ def get_all_books(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)
 
 @router.get("/books/{book_id}", response_model=KotlinBook, tags=["Каталог книг"])
 def get_book(book_id: str, db: Session = Depends(get_db)):
-    """Получить конкретную книгу по ID с обложкой из БД"""
+    """Получить конкретную книгу по ID"""
     книга = db.query(Книги).filter(Книги.id_книги == book_id).first()
     if not книга:
         raise HTTPException(status_code=404, detail="Книга не найдена")
 
+    # Получаем авторов
     авторы = []
     содержание = db.query(Содержание).filter(
         Содержание.id_книги == книга.id_книги
@@ -1148,8 +1193,20 @@ def get_book(book_id: str, db: Session = Depends(get_db)):
                 автор_name = f"{автор.Имя} {автор.Фамилия or ''}".strip()
                 авторы.append(автор_name)
 
-    return KotlinBook.from_db_book(книга, авторы)
-
+    # Создаём объект с языком
+    return KotlinBook(
+        id=книга.id_книги,
+        title=книга.Название,
+        author=", ".join(авторы) if авторы else книга.Автор,
+        coverUrl=книга.Фото_обложки or "",
+        description=книга.Описание or "",
+        pages=книга.Количество_страниц,
+        genre=книга.Жанр or "",
+        isbn=книга.ISBN or "",
+        publishedDate=книга.год_издания or "",
+        publisher=книга.издательство or "",
+        language=книга.Язык or "Русский"  # 👈 ДОБАВЬТЕ ЭТО ПОЛЕ
+    )
 
 @router.get("/books/search", response_model=List[KotlinBook], tags=["Каталог книг"])
 def search_books(query: str, db: Session = Depends(get_db)):
@@ -1190,6 +1247,7 @@ async def create_book(
         published_date: Optional[str] = None,
         publisher: Optional[str] = None,
         cover_file: Optional[UploadFile] = None,
+        language: Optional[str] = None,
         db: Session = Depends(get_db)
 ):
     """Создание новой книги в каталоге"""
@@ -1223,7 +1281,8 @@ async def create_book(
         Жанр=genre or "",
         ISBN=isbn or "",
         год_издания=published_date or "",
-        издательство=publisher or ""
+        издательство=publisher or "",
+        Язык=language or "Русский"
     )
     db.add(new_book)
 
@@ -1486,7 +1545,8 @@ async def unified_book_search(
             "isbn": book.ISBN or "",
             "publishedDate": book.год_издания or "",
             "publisher": book.издательство or "",
-            "source": "local"  # ❗ ДОПОЛНИТЕЛЬНОЕ ПОЛЕ (фронт его может игнорировать)
+            "language": normalize_language(book.Язык or "Русский"),
+            "source": "local"
         })
 
     # ============================================
@@ -1501,7 +1561,7 @@ async def unified_book_search(
 
         # Формируем объект в формате Kotlin Book
         result_books.append({
-            "id": str(uuid.uuid4())[:8],  # временный ID для внешней книги
+            "id": str(uuid.uuid4())[:8],
             "title": result.get("title", ""),
             "author": result.get("author", ""),
             "coverUrl": result.get("cover_url", ""),
@@ -1511,7 +1571,8 @@ async def unified_book_search(
             "isbn": result.get("isbn", ""),
             "publishedDate": result.get("published_date", ""),
             "publisher": result.get("publisher", ""),
-            "source": result.get("source", "external")  # ❗ ДОПОЛНИТЕЛЬНОЕ ПОЛЕ
+            "language": normalize_language(result.get("language", "Русский")),
+            "source": result.get("source", "external")
         })
 
     # ============================================

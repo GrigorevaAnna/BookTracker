@@ -26,13 +26,46 @@ def status_to_db(status: BookStatus) -> str:
 # Преобразование статусов БД -> API
 def status_from_db(db_status: str) -> BookStatus:
     mapping = {
-        "Хочу": BookStatus.WANTS,              # 👈 WANT
+        "Хочу": BookStatus.WANTS,
         "Хочу прочитать": BookStatus.WANT_TO_READ,
         "Читаю": BookStatus.READING,
         "Прочитано": BookStatus.FINISHED,
         "Приостановлено": BookStatus.PAUSED
     }
     return mapping.get(db_status, BookStatus.WANT_TO_READ)
+
+
+def normalize_language(lang: str) -> str:
+    """Преобразует код языка в читаемый вид"""
+    if not lang:
+        return "Русский"
+
+    lang_lower = lang.lower()
+
+    language_map = {
+        "ru": "Русский",
+        "rus": "Русский",
+        "en": "Английский",
+        "eng": "Английский",
+        "fr": "Французский",
+        "fre": "Французский",
+        "de": "Немецкий",
+        "ger": "Немецкий",
+        "es": "Испанский",
+        "spa": "Испанский",
+        "it": "Итальянский",
+        "ita": "Итальянский",
+        "zh": "Китайский",
+        "chi": "Китайский",
+        "ja": "Японский",
+        "jp": "Японский",
+        "ko": "Корейский",
+        "kor": "Корейский"
+    }
+
+    return language_map.get(lang_lower, lang.capitalize() if lang else "Русский")
+
+
 
 # ---------- Модели для таблиц ----------
 
@@ -219,10 +252,11 @@ class KotlinBook(BaseModel):
     isbn: str = ""
     publishedDate: str = ""
     publisher: str = ""
+    language: str = ""
 
     @classmethod
+    @classmethod
     def from_db_book(cls, book, authors: List[str] = None):
-        # Берём ссылку из поля Фото_обложки (Google Drive URL)
         cover_url = getattr(book, 'Фото_обложки', '') or ""
 
         return cls(
@@ -235,7 +269,8 @@ class KotlinBook(BaseModel):
             genre=getattr(book, 'Жанр', '') or "",
             isbn=getattr(book, 'ISBN', '') or "",
             publishedDate=getattr(book, 'год_издания', '') or "",
-            publisher=getattr(book, 'издательство', '') or ""
+            publisher=getattr(book, 'издательство', '') or "",
+            language=normalize_language(getattr(book, 'Язык', '') or "Русский")
         )
 
 class KotlinUserBook(BaseModel):
