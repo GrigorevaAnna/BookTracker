@@ -9,39 +9,32 @@ def fix_cover_url(url: str) -> str:
     if not url:
         return ""
 
-    # Ссылки Google Books
     if "books.google.com" in url:
-        # Прямая ссылка на изображение через Google Books API
-        # Извлекаем ID книги из URL
         if "id=" in url:
             match = re.search(r'id=([^&]+)', url)
             if match:
                 book_id = match.group(1)
-                # Используем прямую ссылку Google Books
                 return f"https://books.google.com/books/content?id={book_id}&printsec=frontcover&img=1&zoom=1&source=gbs_api"
 
-    # Если ссылка уже прямая, возвращаем как есть
     return url
 
 
 class CombinedSearchService:
-    """Комбинированный поиск книг из внешних источников"""
+    """Комбинированный поиск книг"""
 
     async def search_all(self, query: str, db=None) -> List[Dict[str, Any]]:
         """Поиск во всех внешних источниках"""
         results = []
 
-        # Google Books
         google_results = await self._search_google_books(query)
         results.extend(google_results)
 
-        # OpenLibrary
         openlib_results = await self._search_openlibrary(query)
         results.extend(openlib_results)
 
-        # Удаляем дубликаты по названию и автору
-        unique_results = []
+        # Удаляем дубликаты по названию
         seen_keys = set()
+        unique_results = []
         for book in results:
             key = f"{book.get('title', '')}_{book.get('author', '')}"
             if key not in seen_keys:
@@ -64,39 +57,31 @@ class CombinedSearchService:
 
                 data = response.json()
                 results = []
+                query_lower = query.lower().strip()
+                query_words = query_lower.split()
 
                 for item in data.get("items", []):
                     volume = item.get("volumeInfo", {})
                     title = volume.get("title", "")
                     authors = volume.get("authors", [])
-                    description = volume.get("description", "")
-
-                    # ============================================
-                    # УЛУЧШЕННАЯ ФИЛЬТРАЦИЯ
-                    # ============================================
-                    query_lower = query.lower()
-                    query_words = query_lower.split()
-
-                    # Проверяем, содержит ли название все слова запроса
-                    title_match = all(word in title.lower() for word in query_words)
-
-                    # Проверяем, содержит ли автор все слова запроса
                     author_str = ", ".join(authors).lower()
-                    author_match = all(word in author_str for word in query_words)
 
-                    # Проверяем, является ли запрос отдельным словом в авторе
-                    single_word_match = len(query_words) == 1 and query_lower in author_str
+                    # Упрощённая фильтрация
+                    title_match = query_lower in title.lower()
+                    author_match = query_lower in author_str
+                    words_in_title = all(word in title.lower() for word in query_words) if len(
+                        query_words) > 1 else False
+                    words_in_author = all(word in author_str for word in query_words) if len(query_words) > 1 else False
 
-                    # Если запрос совпал с названием, автором или является частью имени автора
-                    if title_match or author_match or single_word_match:
-                        # Извлекаем ISBN
+                    if title_match or author_match or words_in_title or words_in_author:
+                        # ISBN
                         isbn = ""
                         for identifier in volume.get("industryIdentifiers", []):
                             if identifier.get("type") in ["ISBN_13", "ISBN_10"]:
                                 isbn = identifier.get("identifier")
                                 break
 
-                        # Извлекаем обложку
+                        # Обложка
                         images = volume.get("imageLinks", {})
                         cover_url = images.get("thumbnail", "")
                         if cover_url:
@@ -107,7 +92,7 @@ class CombinedSearchService:
                         results.append({
                             "title": title,
                             "author": ", ".join(authors) if authors else "Неизвестный автор",
-                            "description": description,
+                            "description": volume.get("description", ""),
                             "pages": volume.get("pageCount", 0),
                             "isbn": isbn,
                             "cover_url": cover_url,
@@ -117,7 +102,7 @@ class CombinedSearchService:
                             "source": "Google Books"
                         })
 
-                # Возвращаем уникальные результаты (без дубликатов по названию)
+                # Удаляем дубликаты
                 seen_titles = set()
                 unique_results = []
                 for r in results:
@@ -125,7 +110,7 @@ class CombinedSearchService:
                         seen_titles.add(r["title"].lower())
                         unique_results.append(r)
 
-                return unique_results[:15]
+                return unique_results[:20]
         except Exception as e:
             print(f"Google Books ошибка: {e}")
             return []
@@ -144,19 +129,21 @@ class CombinedSearchService:
 
                 data = response.json()
                 results = []
-                query_lower = query.lower()
+                query_lower = query.lower().strip()
                 query_words = query_lower.split()
 
                 for doc in data.get("docs", []):
                     title = doc.get("title", "")
                     authors_list = doc.get("author_name", [])
-
-                    title_match = all(word in title.lower() for word in query_words)
                     author_str = ", ".join(authors_list).lower()
-                    author_match = all(word in author_str for word in query_words)
-                    single_word_match = len(query_words) == 1 and query_lower in author_str
 
-                    if title_match or author_match or single_word_match:
+                    title_match = query_lower in title.lower()
+                    author_match = query_lower in author_str
+                    words_in_title = all(word in title.lower() for word in query_words) if len(
+                        query_words) > 1 else False
+                    words_in_author = all(word in author_str for word in query_words) if len(query_words) > 1 else False
+
+                    if title_match or author_match or words_in_title or words_in_author:
                         cover_id = doc.get("cover_i", "")
                         cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else ""
 
@@ -180,7 +167,7 @@ class CombinedSearchService:
                         seen_titles.add(r["title"].lower())
                         unique_results.append(r)
 
-                return unique_results[:15]
+                return unique_results[:20]
         except Exception as e:
             print(f"OpenLibrary ошибка: {e}")
             return []

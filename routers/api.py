@@ -2040,8 +2040,14 @@ def get_daily_average(
     daily_totals = {}
     for session in sessions:
         if session.Дата_начала:
-            # Берём только дату (без времени)
-            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            # Обработка даты: если это объект date, преобразуем в строку
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                # Если строка
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
+
             daily_totals[date_str] = daily_totals.get(date_str, 0) + (session.duration_minutes or 0)
 
     if not daily_totals:
@@ -2096,7 +2102,12 @@ def get_reading_streak(
     dates = set()
     for session in sessions:
         if session.Дата_начала:
-            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            # Обработка даты
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
             dates.add(date_str)
 
     # Сортируем даты
@@ -2104,7 +2115,22 @@ def get_reading_streak(
 
     # Преобразуем в объекты date
     from datetime import datetime, timedelta
-    date_objects = [datetime.strptime(d, '%Y-%m-%d').date() for d in sorted_dates]
+    date_objects = []
+    for d in sorted_dates:
+        try:
+            if isinstance(d, str):
+                date_objects.append(datetime.strptime(d, '%Y-%m-%d').date())
+            else:
+                date_objects.append(d)
+        except:
+            pass
+
+    if not date_objects:
+        return {
+            "user_id": user_id,
+            "current_streak": 0,
+            "record_streak": 0
+        }
 
     # Вычисляем текущую серию (начиная с сегодняшнего дня)
     today = datetime.now().date()
@@ -2136,6 +2162,7 @@ def get_reading_streak(
     }
 
 
+
 @router.get("/user/{user_id}/stats/all", tags=["Статистика"])
 def get_all_stats(
         user_id: str,
@@ -2144,6 +2171,8 @@ def get_all_stats(
     """
     Получить ВСЮ статистику одним запросом
     """
+    from datetime import datetime, timedelta
+
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
@@ -2173,8 +2202,16 @@ def get_all_stats(
 
     daily_totals = {}
     for session in sessions:
+        # Обработка разных типов даты
         if session.Дата_начала:
-            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            # Если это объект date, преобразуем в строку
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                # Если строка
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
+
             daily_totals[date_str] = daily_totals.get(date_str, 0) + (session.duration_minutes or 0)
 
     if daily_totals:
@@ -2188,12 +2225,24 @@ def get_all_stats(
     dates = set()
     for session in sessions:
         if session.Дата_начала:
-            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
             dates.add(date_str)
 
     sorted_dates = sorted(dates)
-    from datetime import datetime, timedelta
-    date_objects = [datetime.strptime(d, '%Y-%m-%d').date() for d in sorted_dates] if sorted_dates else []
+    date_objects = []
+    for d in sorted_dates:
+        try:
+            # Пробуем распарсить строку
+            if isinstance(d, str):
+                date_objects.append(datetime.strptime(d, '%Y-%m-%d').date())
+            else:
+                date_objects.append(d)
+        except:
+            pass
 
     # Текущая серия
     today = datetime.now().date()
@@ -2232,26 +2281,23 @@ def get_all_stats(
 @router.get("/user/{user_id}/stats/pages-per-day", tags=["Статистика"])
 def get_pages_per_day(
         user_id: str,
-        days: int = 30,  # количество дней для отображения (по умолчанию 30)
+        days: int = 30,
         db: Session = Depends(get_db)
 ):
     """
     Метод: сколько страниц в день пользователь прочитал за последние N дней
-    Возвращает массив с данными для графика
     """
+    from datetime import datetime, timedelta
+
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    from datetime import datetime, timedelta
-
-    # Получаем все сессии за последние days дней
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days)
 
     # Преобразуем даты в строки для сравнения
     start_date_str = start_date.isoformat()
-    end_date_str = end_date.isoformat()
 
     # Получаем сессии пользователя
     sessions = db.query(Сессии).filter(
@@ -2265,11 +2311,15 @@ def get_pages_per_day(
     daily_pages = {}
     for session in sessions:
         if session.Дата_начала:
-            # Берём только дату (без времени)
-            date_str = session.Дата_начала.split('T')[0] if 'T' in session.Дата_начала else session.Дата_начала
+            # Обработка даты
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
             daily_pages[date_str] = daily_pages.get(date_str, 0) + (session.pages_read or 0)
 
-    # Формируем массив для последних days дней (включая дни с 0)
+    # Формируем массив для последних days дней
     result = []
     for i in range(days):
         current_date = (end_date - timedelta(days=days - 1 - i)).isoformat()
@@ -2280,7 +2330,6 @@ def get_pages_per_day(
             "pages": pages
         })
 
-    # Дополнительная статистика
     total_pages = sum(daily_pages.values())
     days_with_reading = len([p for p in daily_pages.values() if p > 0])
     avg_pages = round(total_pages / days, 1) if days > 0 else 0
@@ -2291,7 +2340,7 @@ def get_pages_per_day(
         "period_days": days,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "daily_pages": result,  # массив для графика
+        "daily_pages": result,
         "total_pages": total_pages,
         "days_with_reading": days_with_reading,
         "average_pages_per_day": avg_pages,
