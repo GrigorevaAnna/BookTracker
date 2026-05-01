@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 import uuid
 import httpx
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 
 from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
@@ -24,7 +25,6 @@ from models.pydantic_models import (
     BookStatus, status_from_db, status_to_db
 )
 
-# from services.yandex_disk import upload_cover_to_yandex_disk_and_db
 
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -543,8 +543,8 @@ async def remove_book_from_user(
 @router.post("/user/{user_id}/add-book", tags=["Библиотека"])
 async def add_book_to_user(
         user_id: str,
-        title: str = Form(...),
-        author: str = Form(...),
+        title: str = Query(...),
+        author: str = Query(...),
         description: Optional[str] = Form(None),
         genre: Optional[str] = Form(None),
         pages: Optional[int] = Form(None),
@@ -693,8 +693,8 @@ async def add_book_to_user(
 @router.post("/user/{user_id}/add-to-library", tags=["Библиотека"])
 async def add_to_library(
         user_id: str,
-        title: str = Form(...),
-        author: str = Form(...),
+        title: str = Query(...),
+        author: str = Query(...),
         description: Optional[str] = Form(None),
         genre: Optional[str] = Form(None),
         pages: Optional[int] = Form(None),
@@ -921,8 +921,8 @@ def get_user_wishlist(
 @router.post("/user/{user_id}/add-to-wishlist", tags=["Вишлист"])
 async def add_to_wishlist(
         user_id: str,
-        title: str = Form(...),
-        author: str = Form(...),
+        title: str = Query(...),
+        author: str = Query(...),
         description: Optional[str] = Form(None),
         pages: Optional[int] = Form(None),
         isbn: Optional[str] = Form(None),
