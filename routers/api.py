@@ -495,6 +495,8 @@ async def add_review(
     return {"message": "Отзыв добавлен", "rating": rating}
 
 
+
+
 @router.delete("/user/{user_id}/book/{book_id}", tags=["Библиотека"])
 async def remove_book_from_user(
         user_id: str,
@@ -537,41 +539,36 @@ async def remove_book_from_user(
         "old_status": old_status
     }
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 
 @router.post("/user/{user_id}/add-book", tags=["Библиотека"])
 async def add_book_to_user(
         user_id: str,
-        request: Request,  # 👈 Добавляем request для чтения JSON
+        title: str = Form(...),
+        author: str = Form(...),
+        description: Optional[str] = Form(None),
+        genre: Optional[str] = Form(None),
+        pages: Optional[int] = Form(None),
+        isbn: Optional[str] = Form(None),
+        cover_url: Optional[str] = Form(None),
+        cover_file: Optional[UploadFile] = File(None),
+        language: Optional[str] = Form(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
 
-    # Получаем JSON из тела запроса
-    try:
-        data = await request.json()
-    except:
-        raise HTTPException(status_code=400, detail="Ожидается JSON в теле запроса")
+    print("=" * 50)
+    print(f"📥 add_book_to_user вызван")
+    print(f"   user_id: {user_id}")
+    print(f"   title: {title}")
+    print(f"   author: {author}")
+    print(f"   cover_url: {cover_url}")
+    print("=" * 50)
 
-    # Извлекаем параметры из JSON
-    title = data.get("title", "")
-    author = data.get("author", "")
-    description = data.get("description")
-    genre = data.get("genre")
-    pages = data.get("pages")
-    isbn = data.get("isbn")
-    cover_url = data.get("cover_url") or data.get("coverUrl")
-    language = data.get("language")
 
-    print(f"🔍 add_book_to_user вызван с cover_url: {cover_url}")
-    print(f"📋 Получены данные: title={title}, author={author}, isbn={isbn}")
-
-    # Проверяем пользователя
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    # Ищем существующую книгу
     existing_book = None
     if isbn:
         existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
@@ -584,7 +581,6 @@ async def add_book_to_user(
             )
         ).first()
 
-    # Если книги нет — создаём новую
     if not existing_book:
         book_id = str(uuid.uuid4())[:8]
         work_id = str(uuid.uuid4())[:8]
@@ -597,13 +593,6 @@ async def add_book_to_user(
         )
         db.add(new_work)
 
-        # Сохраняем обложку на Google Drive
-        final_cover_url = cover_url
-        if cover_url:
-            print(f"🔄 Вызываю download_and_upload_cover для {book_id}")
-            final_cover_url = await download_and_upload_cover(book_id, cover_url)
-            print(f"🔄 Результат: {final_cover_url[:80] if final_cover_url else 'None'}")
-
         new_book = Книги(
             id_книги=book_id,
             Название=title.strip(),
@@ -612,7 +601,7 @@ async def add_book_to_user(
             Описание=description or "",
             Жанр=genre or "",
             ISBN=isbn or "",
-            Фото_обложки=final_cover_url,
+            Фото_обложки=cover_url or "",
             Язык=language or "Русский"
         )
         db.add(new_book)
@@ -645,8 +634,13 @@ async def add_book_to_user(
         db.flush()
         created_book_id = book_id
         created_work_id = work_id
-        db.commit()
 
+        if cover_file:
+            cover_content = await cover_file.read()
+            new_book.Фото_данные = cover_content
+            new_book.Фото_тип = cover_file.content_type
+
+        db.commit()
     else:
         created_book_id = existing_book.id_книги
         content = db.query(Содержание).filter(
@@ -654,13 +648,12 @@ async def add_book_to_user(
         ).first()
         created_work_id = content.id_произведения if content else None
 
-        # Если у книги нет обложки, но есть внешняя ссылка — сохраняем
-        if cover_url and not existing_book.Фото_обложки:
-            final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
-            existing_book.Фото_обложки = final_cover_url
+        if cover_file and not existing_book.Фото_данные:
+            cover_content = await cover_file.read()
+            existing_book.Фото_данные = cover_content
+            existing_book.Фото_тип = cover_file.content_type
             db.commit()
 
-    # Проверяем, есть ли уже книга у пользователя
     existing_user_book = db.query(Сессия_статус).filter(
         and_(
             Сессия_статус.id_пользователя == user_id,
@@ -679,7 +672,6 @@ async def add_book_to_user(
             }
         )
 
-    # Добавляем статус
     new_status = Сессия_статус(
         id_пользователя=user_id,
         id_произведения=created_work_id,
@@ -701,18 +693,19 @@ async def add_book_to_user(
 @router.post("/user/{user_id}/add-to-library", tags=["Библиотека"])
 async def add_to_library(
         user_id: str,
-        title: str,
-        author: str,
-        description: Optional[str] = None,
-        genre: Optional[str] = None,
-        pages: Optional[int] = None,
-        isbn: Optional[str] = None,
-        cover_url: Optional[str] = None,
-        cover_file: Optional[UploadFile] = None,
-        language: Optional[str] = None,
+        title: str = Form(...),
+        author: str = Form(...),
+        description: Optional[str] = Form(None),
+        genre: Optional[str] = Form(None),
+        pages: Optional[int] = Form(None),
+        isbn: Optional[str] = Form(None),
+        cover_url: Optional[str] = Form(None),
+        cover_file: Optional[UploadFile] = File(None),
+        language: Optional[str] = Form(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в библиотеку со статусом 'Хочу прочитать'"""
+
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
@@ -928,17 +921,18 @@ def get_user_wishlist(
 @router.post("/user/{user_id}/add-to-wishlist", tags=["Вишлист"])
 async def add_to_wishlist(
         user_id: str,
-        title: str,
-        author: str,
-        description: Optional[str] = None,
-        pages: Optional[int] = None,
-        isbn: Optional[str] = None,
-        cover_url: Optional[str] = None,
-        cover_file: Optional[UploadFile] = None,
-        language: Optional[str] = None,
+        title: str = Form(...),
+        author: str = Form(...),
+        description: Optional[str] = Form(None),
+        pages: Optional[int] = Form(None),
+        isbn: Optional[str] = Form(None),
+        cover_url: Optional[str] = Form(None),
+        cover_file: Optional[UploadFile] = File(None),
+        language: Optional[str] = Form(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
+
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
