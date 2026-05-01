@@ -537,47 +537,41 @@ async def remove_book_from_user(
         "old_status": old_status
     }
 
-
-from fastapi import Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 
 @router.post("/user/{user_id}/add-book", tags=["Библиотека"])
 async def add_book_to_user(
         user_id: str,
-        request: Request,  # 👈 Добавляем request
-        db: Session = Depends(get_db),
-        title: Optional[str] = Form(None),
-        author: Optional[str] = Form(None),
-        description: Optional[str] = Form(None),
-        genre: Optional[str] = Form(None),
-        pages: Optional[int] = Form(None),
-        isbn: Optional[str] = Form(None),
-        cover_url: Optional[str] = Form(None),
-        cover_file: Optional[UploadFile] = File(None),
-        language: Optional[str] = Form(None),
+        request: Request,  # 👈 Добавляем request для чтения JSON
+        db: Session = Depends(get_db)
 ):
-    # Если данные пришли как JSON, берём оттуда
-    content_type = request.headers.get("content-type", "")
+    """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
 
-    if "application/json" in content_type:
+    # Получаем JSON из тела запроса
+    try:
         data = await request.json()
-        title = data.get("title", "")
-        author = data.get("author", "")
-        cover_url = data.get("cover_url", cover_url)
-        isbn = data.get("isbn", isbn)
-        pages = data.get("pages", pages)
-        description = data.get("description", description)
-        genre = data.get("genre", genre)
-        language = data.get("language", language)
+    except:
+        raise HTTPException(status_code=400, detail="Ожидается JSON в теле запроса")
 
-    print(f"🔍 cover_url: {cover_url}")
+    # Извлекаем параметры из JSON
+    title = data.get("title", "")
+    author = data.get("author", "")
+    description = data.get("description")
+    genre = data.get("genre")
+    pages = data.get("pages")
+    isbn = data.get("isbn")
+    cover_url = data.get("cover_url") or data.get("coverUrl")
+    language = data.get("language")
 
-    """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
     print(f"🔍 add_book_to_user вызван с cover_url: {cover_url}")
-    """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
+    print(f"📋 Получены данные: title={title}, author={author}, isbn={isbn}")
+
+    # Проверяем пользователя
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
+    # Ищем существующую книгу
     existing_book = None
     if isbn:
         existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
@@ -590,6 +584,7 @@ async def add_book_to_user(
             )
         ).first()
 
+    # Если книги нет — создаём новую
     if not existing_book:
         book_id = str(uuid.uuid4())[:8]
         work_id = str(uuid.uuid4())[:8]
@@ -602,11 +597,12 @@ async def add_book_to_user(
         )
         db.add(new_work)
 
+        # Сохраняем обложку на Google Drive
         final_cover_url = cover_url
         if cover_url:
-            print(f"🔄 Вызываю download_and_upload_cover для {book_id}")  # 👈 ДОБАВЬТЕ
+            print(f"🔄 Вызываю download_and_upload_cover для {book_id}")
             final_cover_url = await download_and_upload_cover(book_id, cover_url)
-            print(f"🔄 Результат: {final_cover_url[:80] if final_cover_url else 'None'}")  # 👈 ДОБАВЬТЕ
+            print(f"🔄 Результат: {final_cover_url[:80] if final_cover_url else 'None'}")
 
         new_book = Книги(
             id_книги=book_id,
@@ -616,7 +612,7 @@ async def add_book_to_user(
             Описание=description or "",
             Жанр=genre or "",
             ISBN=isbn or "",
-            Фото_обложки=final_cover_url,  # 👈 ссылка на Google Drive
+            Фото_обложки=final_cover_url,
             Язык=language or "Русский"
         )
         db.add(new_book)
@@ -649,13 +645,8 @@ async def add_book_to_user(
         db.flush()
         created_book_id = book_id
         created_work_id = work_id
-
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
-
         db.commit()
+
     else:
         created_book_id = existing_book.id_книги
         content = db.query(Содержание).filter(
@@ -663,18 +654,13 @@ async def add_book_to_user(
         ).first()
         created_work_id = content.id_произведения if content else None
 
-        # 👇 Если у книги нет обложки, но есть внешняя ссылка — сохраняем
+        # Если у книги нет обложки, но есть внешняя ссылка — сохраняем
         if cover_url and not existing_book.Фото_обложки:
             final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
             existing_book.Фото_обложки = final_cover_url
             db.commit()
 
-        if cover_file and not existing_book.Фото_данные:
-            cover_content = await cover_file.read()
-            existing_book.Фото_данные = cover_content
-            existing_book.Фото_тип = cover_file.content_type
-            db.commit()
-
+    # Проверяем, есть ли уже книга у пользователя
     existing_user_book = db.query(Сессия_статус).filter(
         and_(
             Сессия_статус.id_пользователя == user_id,
@@ -693,6 +679,7 @@ async def add_book_to_user(
             }
         )
 
+    # Добавляем статус
     new_status = Сессия_статус(
         id_пользователя=user_id,
         id_произведения=created_work_id,
