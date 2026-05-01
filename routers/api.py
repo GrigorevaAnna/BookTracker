@@ -545,13 +545,12 @@ async def add_book_to_user(
         user_id: str,
         title: str = Query(...),
         author: str = Query(...),
-        description: Optional[str] = Form(None),
-        genre: Optional[str] = Form(None),
-        pages: Optional[int] = Form(None),
-        isbn: Optional[str] = Form(None),
-        cover_url: Optional[str] = Form(None),
-        cover_file: Optional[UploadFile] = File(None),
-        language: Optional[str] = Form(None),
+        description: Optional[str] = Query(None),
+        genre: Optional[str] = Query(None),
+        pages: Optional[int] = Query(None),
+        isbn: Optional[str] = Query(None),
+        cover_url: Optional[str] = Query(None),
+        language: Optional[str] = Query(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу пользователю со статусом 'Хочу прочитать'"""
@@ -563,7 +562,6 @@ async def add_book_to_user(
     print(f"   author: {author}")
     print(f"   cover_url: {cover_url}")
     print("=" * 50)
-
 
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
@@ -635,11 +633,6 @@ async def add_book_to_user(
         created_book_id = book_id
         created_work_id = work_id
 
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
-
         db.commit()
     else:
         created_book_id = existing_book.id_книги
@@ -647,12 +640,6 @@ async def add_book_to_user(
             Содержание.id_книги == existing_book.id_книги
         ).first()
         created_work_id = content.id_произведения if content else None
-
-        if cover_file and not existing_book.Фото_данные:
-            cover_content = await cover_file.read()
-            existing_book.Фото_данные = cover_content
-            existing_book.Фото_тип = cover_file.content_type
-            db.commit()
 
     existing_user_book = db.query(Сессия_статус).filter(
         and_(
@@ -695,13 +682,12 @@ async def add_to_library(
         user_id: str,
         title: str = Query(...),
         author: str = Query(...),
-        description: Optional[str] = Form(None),
-        genre: Optional[str] = Form(None),
-        pages: Optional[int] = Form(None),
-        isbn: Optional[str] = Form(None),
-        cover_url: Optional[str] = Form(None),
-        cover_file: Optional[UploadFile] = File(None),
-        language: Optional[str] = Form(None),
+        description: Optional[str] = Query(None),
+        genre: Optional[str] = Query(None),
+        pages: Optional[int] = Query(None),
+        isbn: Optional[str] = Query(None),
+        cover_url: Optional[str] = Query(None),
+        language: Optional[str] = Query(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в библиотеку со статусом 'Хочу прочитать'"""
@@ -781,10 +767,6 @@ async def add_to_library(
         created_book_id = book_id
         created_work_id = work_id
 
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
 
         db.commit()
     else:
@@ -798,12 +780,6 @@ async def add_to_library(
         if cover_url and not existing_book.Фото_обложки:
             final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
             existing_book.Фото_обложки = final_cover_url
-            db.commit()
-
-        if cover_file and not existing_book.Фото_данные:
-            cover_content = await cover_file.read()
-            existing_book.Фото_данные = cover_content
-            existing_book.Фото_тип = cover_file.content_type
             db.commit()
 
     existing_status = db.query(Сессия_статус).filter(
@@ -923,12 +899,11 @@ async def add_to_wishlist(
         user_id: str,
         title: str = Query(...),
         author: str = Query(...),
-        description: Optional[str] = Form(None),
-        pages: Optional[int] = Form(None),
-        isbn: Optional[str] = Form(None),
-        cover_url: Optional[str] = Form(None),
-        cover_file: Optional[UploadFile] = File(None),
-        language: Optional[str] = Form(None),
+        description: Optional[str] = Query(None),
+        pages: Optional[int] = Query(None),
+        isbn: Optional[str] = Query(None),
+        cover_url: Optional[str] = Query(None),
+        language: Optional[str] = Query(None),
         db: Session = Depends(get_db)
 ):
     """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
@@ -1007,11 +982,6 @@ async def add_to_wishlist(
         created_book_id = book_id
         created_work_id = work_id
 
-        if cover_file:
-            cover_content = await cover_file.read()
-            new_book.Фото_данные = cover_content
-            new_book.Фото_тип = cover_file.content_type
-
         db.commit()
     else:
         created_book_id = existing_book.id_книги
@@ -1026,11 +996,6 @@ async def add_to_wishlist(
             existing_book.Фото_обложки = final_cover_url
             db.commit()
 
-        if cover_file and not existing_book.Фото_данные:
-            cover_content = await cover_file.read()
-            existing_book.Фото_данные = cover_content
-            existing_book.Фото_тип = cover_file.content_type
-            db.commit()
 
     existing_wishlist = db.query(Вишлист).filter(
         and_(
