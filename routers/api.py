@@ -7,7 +7,7 @@ from datetime import datetime
 import os
 import uuid
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
 
 from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
@@ -1650,12 +1650,15 @@ async def combined_search_by_isbn(
 @router.post("/user/{user_id}/quotes", tags=["Цитаты"])
 async def add_quote(
         user_id: str,
-        book_id: str,
-        text: str,
-        page: Optional[int] = None,
-        tags: Optional[List[str]] = None,
-        db: Session = Depends(get_db)
+        book_id: str = Query(...),
+        text: str = Query(...),
+        page: Optional[int] = Query(None),
+        db: Session = Depends(get_db),
+        request: Request = None
 ):
+    # Получаем тэги из тела запроса
+    body = await request.json()
+    tags = body.get("hashTags", []) if body else None
     """Добавить цитату из книги с персональными тэгами"""
 
     # 1. Проверяем, существует ли книга
@@ -1872,13 +1875,14 @@ async def add_tag_to_quote(
     return {"message": f"Тэг '{tag_name}' добавлен к цитате"}
 
 
+from fastapi import Request
+
+
 @router.put("/user/{user_id}/quotes/{quote_id}", tags=["Цитаты"])
 async def update_quote(
         user_id: str,
         quote_id: str,
-        text: Optional[str] = None,
-        page: Optional[int] = None,
-        tags: Optional[List[str]] = None,  # 👈 можно обновить тэги
+        request: Request,
         db: Session = Depends(get_db)
 ):
     """
@@ -1887,6 +1891,17 @@ async def update_quote(
     - Можно изменить страницу
     - Можно заменить все тэги новым списком
     """
+    # Читаем тело запроса
+    try:
+        body = await request.json()
+    except:
+        body = {}
+
+    text = body.get("text")
+    page = body.get("page")
+    tags = body.get("hashTags") or body.get("tags")  # фронт может отправлять hashTags
+
+    print(f"📝 Обновление цитаты {quote_id}: text={text}, page={page}, tags={tags}")
 
     # Проверяем, что цитата принадлежит пользователю
     quote = db.query(Цитаты).filter(
@@ -1941,7 +1956,7 @@ async def update_quote(
             )
             db.add(quote_tag)
 
-    quote.updated_at = datetime.now()  # если есть такое поле
+    quote.updated_at = datetime.now()
     db.commit()
 
     return {"message": "Цитата обновлена"}
@@ -2239,10 +2254,7 @@ def get_reading_streak(
 
 
 @router.get("/user/{user_id}/stats/all", tags=["Статистика"])
-def get_all_stats(
-        user_id: str,
-        db: Session = Depends(get_db)
-):
+def get_all_stats(user_id: str, db: Session = Depends(get_db)):
     """
     Получить ВСЮ статистику одним запросом
     """
@@ -2340,16 +2352,13 @@ def get_all_stats(
     max_streak = max(max_streak, current)
 
     return {
-        "user_id": user_id,
-        "finished_books": finished_count,
-        "total_pages_read": total_pages,
-        "total_minutes_read": total_minutes,
-        "total_hours_read": round(total_minutes / 60, 1),
-        "average_minutes_per_day": avg_minutes,
-        "average_hours_per_day": avg_hours,
-        "current_streak": current_streak,
-        "record_streak": max_streak,
-        "total_days_with_reading": len(date_objects)
+        "totalBooks": finished_count,           # было finished_books
+        "totalPages": total_pages,              # было total_pages_read
+        "totalReadingMinutes": total_minutes,   # было total_minutes_read
+        "currentStreak": current_streak,        # было current_streak
+        "longestStreak": max_streak,            # было record_streak
+        "avgDailyMinutes": avg_minutes,         # было average_minutes_per_day
+        "activityData": {}  # если нужно, добавьте данные по дням
     }
 
 
