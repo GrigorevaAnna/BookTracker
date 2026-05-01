@@ -2004,12 +2004,21 @@ async def delete_quote(
         quote_id: str,
         db: Session = Depends(get_db)
 ):
-    """Удалить цитату"""
+    """Удалить цитату и все её связи с тэгами"""
+
+    # 1. Находим цитату
     quote = db.query(Цитаты).filter(Цитаты.id_цитаты == quote_id).first()
     if not quote:
         raise HTTPException(status_code=404, detail="Цитата не найдена")
 
+    # 2. Сначала удаляем все связи цитаты с тэгами
+    db.query(Связь_цитаты_тэги).filter(
+        Связь_цитаты_тэги.id_цитаты == quote_id
+    ).delete()
+
+    # 3. Затем удаляем саму цитату
     db.delete(quote)
+
     db.commit()
 
     return {"message": "Цитата удалена"}
