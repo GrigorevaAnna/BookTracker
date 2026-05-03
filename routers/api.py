@@ -2789,17 +2789,23 @@ async def save_recommendation_reaction(
         db: Session = Depends(get_db)
 ):
     """
-    Сохранить реакцию пользователя на рекомендованную книгу
+    Сохранить реакцию пользователя на рекомендованную книгу.
 
     reaction:
-    - liked (нравится) — будет учтено в следующих рекомендациях
+    - liked (нравится) — книга добавляется в вишлист автоматически!
     - disliked (не нравится) — похожие книги будут исключены
     """
+    print(f"\n{'=' * 60}")
+    print(f"📥 РЕАКЦИЯ: {reaction} | {title} — {author}")
+    print(f"{'=' * 60}\n")
+
     user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    # Проверяем, не было ли уже реакции
+    # ================================================================
+    # 1. Сохраняем реакцию
+    # ================================================================
     existing = db.query(Рекомендации_реакции).filter(
         and_(
             Рекомендации_реакции.id_пользователя == user_id,
@@ -2809,7 +2815,6 @@ async def save_recommendation_reaction(
     ).first()
 
     if existing:
-        # Обновляем существующую реакцию
         existing.reaction = reaction
         if genre:
             existing.genre = genre
@@ -2819,7 +2824,6 @@ async def save_recommendation_reaction(
             existing.reason = reason
         message = f"Реакция обновлена на '{reaction}'"
     else:
-        # Создаём новую реакцию
         new_reaction = Рекомендации_реакции(
             id_пользователя=user_id,
             title=title,
@@ -2833,21 +2837,134 @@ async def save_recommendation_reaction(
         message = f"Реакция '{reaction}' сохранена"
 
     db.commit()
+    print(f"   ✅ Реакция сохранена")
 
-    # Очищаем кеш рекомендаций при новой реакции
-    # (чтобы следующие рекомендации учли изменения)
+    # ================================================================
+    # 2. Если LIKED → добавляем книгу в вишлист
+    # ================================================================
+    wishlist_result = None
+
+    if reaction == "liked":
+        # Ищем или создаём книгу
+        existing_book = db.query(Книги).filter(
+            and_(
+                Книги.Название.ilike(title.strip()),
+                Книги.Автор.ilike(author.strip())
+            )
+        ).first()
+
+        if not existing_book:
+            # Создаём новую книгу
+            book_id = str(uuid.uuid4())[:8]
+            work_id = str(uuid.uuid4())[:8]
+
+            new_work = Произведения(
+                id_произведения=work_id,
+                Название=title.strip(),
+                Описание=summary or "",
+                Количество_страниц=0
+            )
+            db.add(new_work)
+
+            new_book = Книги(
+                id_книги=book_id,
+                Название=title.strip(),
+                Автор=author.strip(),
+                Количество_страниц=0,
+                Описание=summary or "",
+                Жанр=genre or "",
+                Язык="Русский"
+            )
+            db.add(new_book)
+
+            content = Содержание(
+                id_книги=book_id,
+                id_произведения=work_id,
+                порядок_в_книге=1
+            )
+            db.add(content)
+
+            # Создаём автора
+            name_parts = author.strip().split()
+            if name_parts:
+                author_id = str(uuid.uuid4())[:8]
+                new_author = Авторы(
+                    id_автора=author_id,
+                    Имя=name_parts[0] if len(name_parts) > 0 else author,
+                    Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
+                    Отчество=""
+                )
+                db.add(new_author)
+
+                труд = Труд(
+                    id_автора=author_id,
+                    id_произведения=work_id,
+                    роль="автор"
+                )
+                db.add(труд)
+
+            db.flush()
+            created_book_id = book_id
+            print(f"   📝 Создана новая книга: {created_book_id}")
+        else:
+            created_book_id = existing_book.id_книги
+            print(f"   📚 Книга уже в БД: {created_book_id}")
+
+        # Проверяем, нет ли уже в вишлисте
+        existing_wishlist = db.query(Вишлист).filter(
+            and_(
+                Вишлист.id_пользователя == user_id,
+                Вишлист.id_книги == created_book_id
+            )
+        ).first()
+
+        if not existing_wishlist:
+            # Добавляем в вишлист
+            wishlist_item = Вишлист(
+                id_пользователя=user_id,
+                id_книги=created_book_id,
+                дата_добавления=datetime.now().isoformat(),
+                приоритет=1
+            )
+            db.add(wishlist_item)
+            db.commit()
+
+            wishlist_result = {
+                "added_to_wishlist": True,
+                "book_id": created_book_id,
+                "message": f"Книга '{title}' добавлена в вишлист"
+            }
+            print(f"   ✅ Книга добавлена в вишлист!")
+        else:
+            wishlist_result = {
+                "added_to_wishlist": False,
+                "book_id": created_book_id,
+                "message": "Книга уже была в вишлисте"
+            }
+            print(f"   ℹ️ Книга уже в вишлисте")
+
+        db.commit()
+
+    # ================================================================
+    # 3. Очищаем кеш рекомендаций
+    # ================================================================
     db.query(Кеш_рекомендаций).filter(
         Кеш_рекомендаций.id_пользователя == user_id
     ).delete()
     db.commit()
+    print(f"   🧹 Кеш рекомендаций очищен")
+
+    print(f"{'=' * 60}\n")
 
     return {
         "message": message,
         "reaction": reaction,
         "title": title,
         "author": author,
-        "cache_cleared": True
+        "cache_cleared": True,
+        "wishlist": wishlist_result  # 👈 информация о добавлении в вишлист
     }
+
 
 
 @router.get("/user/{user_id}/recommendations/history", tags=["Рекомендации"])
