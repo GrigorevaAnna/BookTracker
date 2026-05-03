@@ -992,7 +992,7 @@ async def add_to_wishlist(
         language: Optional[str] = Query(None),
         db: Session = Depends(get_db)
 ):
-    """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
+    """Добавляет книгу в вишлист. Используется из поиска/внешних API."""
 
     # 👇 ЛОГИРОВАНИЕ
     print("\n" + "=" * 60)
@@ -1000,7 +1000,7 @@ async def add_to_wishlist(
     print(f"   user_id: {user_id}")
     print(f"   title: {title}")
     print(f"   author: {author}")
-    print(f"   cover_url: {cover_url}")
+    print(f"   cover_url: {cover_url[:60] if cover_url else 'None'}...")
     print(f"   isbn: {isbn}")
     print("=" * 60 + "\n")
 
@@ -1050,16 +1050,18 @@ async def add_to_wishlist(
             db.add(new_work)
             print("   ✅ Произведение создано")
 
-            # Загружаем обложку (с обработкой ошибок)
+            # 👇 БЕЗОПАСНАЯ загрузка обложки (Google Drive может быть недоступен)
             final_cover_url = cover_url or ""
             if cover_url:
                 try:
-                    print(f"   📸 Загружаю обложку: {cover_url[:60]}...")
+                    print(f"   📸 Загружаю обложку на Google Drive: {cover_url[:60]}...")
                     final_cover_url = await download_and_upload_cover(book_id, cover_url)
                     print(f"   ✅ Обложка загружена: {final_cover_url[:60]}...")
                 except Exception as e:
-                    print(f"   ⚠️ Ошибка загрузки обложки: {e}")
-                    final_cover_url = cover_url  # Оставляем исходную
+                    print(f"   ⚠️ Google Drive недоступен, оставляю исходную ссылку: {e}")
+                    final_cover_url = cover_url  # Оставляем исходную ссылку
+            else:
+                print("   ℹ️ Обложка не указана")
 
             # Создаём книгу
             new_book = Книги(
@@ -1119,7 +1121,7 @@ async def add_to_wishlist(
             created_work_id = content.id_произведения if content else None
             print(f"   Использую существующую книгу: {created_book_id}")
 
-            # Обновляем обложку если нужно
+            # 👇 БЕЗОПАСНОЕ обновление обложки если её нет
             if cover_url and not existing_book.Фото_обложки:
                 try:
                     print(f"   📸 Обновляю обложку: {cover_url[:60]}...")
@@ -1128,7 +1130,8 @@ async def add_to_wishlist(
                     db.commit()
                     print(f"   ✅ Обложка обновлена")
                 except Exception as e:
-                    print(f"   ⚠️ Ошибка обновления обложки: {e}")
+                    print(f"   ⚠️ Не удалось обновить обложку: {e}")
+                    # Не падаем, просто оставляем без обложки
 
         # Проверяем, нет ли уже в вишлисте
         print(f"🔍 Проверяю вишлист: user={user_id}, book={created_book_id}")
@@ -1152,6 +1155,7 @@ async def add_to_wishlist(
         )
         db.add(wishlist_item)
         db.commit()
+
         print(f"✅ Книга '{title}' добавлена в вишлист!")
         print("=" * 60 + "\n")
 
