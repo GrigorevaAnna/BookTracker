@@ -909,125 +909,182 @@ async def add_to_wishlist(
 ):
     """Добавляет книгу в вишлист со статусом 'Хочу купить'"""
 
-    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    # 👇 ЛОГИРОВАНИЕ
+    print("\n" + "=" * 60)
+    print(f"📥 ВИШЛИСТ: Запрос на добавление")
+    print(f"   user_id: {user_id}")
+    print(f"   title: {title}")
+    print(f"   author: {author}")
+    print(f"   cover_url: {cover_url}")
+    print(f"   isbn: {isbn}")
+    print("=" * 60 + "\n")
 
-    existing_book = None
-    if isbn:
-        existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+    try:
+        # Проверяем пользователя
+        user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+        if not user:
+            print("❌ Пользователь не найден")
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    if not existing_book:
-        existing_book = db.query(Книги).filter(
-            and_(
-                Книги.Название.ilike(title.strip()),
-                Книги.Автор.ilike(author.strip())
-            )
-        ).first()
+        print("✅ Пользователь найден")
 
-    if not existing_book:
-        book_id = str(uuid.uuid4())[:8]
-        work_id = str(uuid.uuid4())[:8]
+        # Ищем существующую книгу
+        existing_book = None
+        if isbn:
+            print(f"🔍 Ищу по ISBN: {isbn}")
+            existing_book = db.query(Книги).filter(Книги.ISBN == isbn).first()
+            if existing_book:
+                print(f"✅ Книга найдена по ISBN: {existing_book.id_книги}")
 
-        new_work = Произведения(
-            id_произведения=work_id,
-            Название=title.strip(),
-            Описание=description or "",
-            Количество_страниц=pages or 0
-        )
-        db.add(new_work)
+        if not existing_book:
+            print(f"🔍 Ищу по названию и автору: {title} — {author}")
+            existing_book = db.query(Книги).filter(
+                and_(
+                    Книги.Название.ilike(title.strip()),
+                    Книги.Автор.ilike(author.strip())
+                )
+            ).first()
+            if existing_book:
+                print(f"✅ Книга найдена в БД: {existing_book.id_книги}")
+            else:
+                print("📝 Книга не найдена, создаю новую...")
 
-        # 👇 БЕЗОПАСНАЯ загрузка обложки
-        final_cover_url = cover_url or ""
-        if cover_url:
-            try:
-                final_cover_url = await download_and_upload_cover(book_id, cover_url)
-            except Exception as e:
-                print(f"⚠️ Не удалось загрузить обложку на Google Drive: {e}")
-                final_cover_url = cover_url  # Оставляем исходную ссылку
+        if not existing_book:
+            book_id = str(uuid.uuid4())[:8]
+            work_id = str(uuid.uuid4())[:8]
 
-        new_book = Книги(
-            id_книги=book_id,
-            Название=title.strip(),
-            Автор=author.strip(),
-            Количество_страниц=pages or 0,
-            Описание=description or "",
-            ISBN=isbn or "",
-            Фото_обложки=final_cover_url,
-            Язык=language or "Русский"
-        )
-        db.add(new_book)
+            print(f"   Новая книга: book_id={book_id}, work_id={work_id}")
 
-        content = Содержание(
-            id_книги=book_id,
-            id_произведения=work_id,
-            порядок_в_книге=1
-        )
-        db.add(content)
-
-        name_parts = author.strip().split()
-        if name_parts:
-            author_id = str(uuid.uuid4())[:8]
-            new_author = Авторы(
-                id_автора=author_id,
-                Имя=name_parts[0] if len(name_parts) > 0 else author,
-                Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
-                Отчество=""
-            )
-            db.add(new_author)
-
-            труд = Труд(
-                id_автора=author_id,
+            # Создаём произведение
+            new_work = Произведения(
                 id_произведения=work_id,
-                роль="автор"
+                Название=title.strip(),
+                Описание=description or "",
+                Количество_страниц=pages or 0
             )
-            db.add(труд)
+            db.add(new_work)
+            print("   ✅ Произведение создано")
 
-        db.flush()
-        created_book_id = book_id
-        created_work_id = work_id
-        db.commit()
-    else:
-        created_book_id = existing_book.id_книги
-        content = db.query(Содержание).filter(
-            Содержание.id_книги == existing_book.id_книги
+            # Загружаем обложку (с обработкой ошибок)
+            final_cover_url = cover_url or ""
+            if cover_url:
+                try:
+                    print(f"   📸 Загружаю обложку: {cover_url[:60]}...")
+                    final_cover_url = await download_and_upload_cover(book_id, cover_url)
+                    print(f"   ✅ Обложка загружена: {final_cover_url[:60]}...")
+                except Exception as e:
+                    print(f"   ⚠️ Ошибка загрузки обложки: {e}")
+                    final_cover_url = cover_url  # Оставляем исходную
+
+            # Создаём книгу
+            new_book = Книги(
+                id_книги=book_id,
+                Название=title.strip(),
+                Автор=author.strip(),
+                Количество_страниц=pages or 0,
+                Описание=description or "",
+                ISBN=isbn or "",
+                Фото_обложки=final_cover_url,
+                Язык=language or "Русский"
+            )
+            db.add(new_book)
+            print("   ✅ Книга создана")
+
+            # Связь содержание
+            content = Содержание(
+                id_книги=book_id,
+                id_произведения=work_id,
+                порядок_в_книге=1
+            )
+            db.add(content)
+            print("   ✅ Связь Содержание создана")
+
+            # Создаём автора
+            name_parts = author.strip().split()
+            if name_parts:
+                author_id = str(uuid.uuid4())[:8]
+                new_author = Авторы(
+                    id_автора=author_id,
+                    Имя=name_parts[0] if len(name_parts) > 0 else author,
+                    Фамилия=name_parts[-1] if len(name_parts) > 1 else "",
+                    Отчество=""
+                )
+                db.add(new_author)
+                print(f"   ✅ Автор создан: {author_id}")
+
+                труд = Труд(
+                    id_автора=author_id,
+                    id_произведения=work_id,
+                    роль="автор"
+                )
+                db.add(труд)
+                print("   ✅ Связь Труд создана")
+
+            db.flush()
+            created_book_id = book_id
+            created_work_id = work_id
+            db.commit()
+            print(f"   ✅ Всё сохранено в БД")
+
+        else:
+            created_book_id = existing_book.id_книги
+            content = db.query(Содержание).filter(
+                Содержание.id_книги == existing_book.id_книги
+            ).first()
+            created_work_id = content.id_произведения if content else None
+            print(f"   Использую существующую книгу: {created_book_id}")
+
+            # Обновляем обложку если нужно
+            if cover_url and not existing_book.Фото_обложки:
+                try:
+                    print(f"   📸 Обновляю обложку: {cover_url[:60]}...")
+                    final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
+                    existing_book.Фото_обложки = final_cover_url
+                    db.commit()
+                    print(f"   ✅ Обложка обновлена")
+                except Exception as e:
+                    print(f"   ⚠️ Ошибка обновления обложки: {e}")
+
+        # Проверяем, нет ли уже в вишлисте
+        print(f"🔍 Проверяю вишлист: user={user_id}, book={created_book_id}")
+        existing_wishlist = db.query(Вишлист).filter(
+            and_(
+                Вишлист.id_пользователя == user_id,
+                Вишлист.id_книги == created_book_id
+            )
         ).first()
-        created_work_id = content.id_произведения if content else None
 
-        # 👇 БЕЗОПАСНОЕ обновление обложки
-        if cover_url and not existing_book.Фото_обложки:
-            try:
-                final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
-                existing_book.Фото_обложки = final_cover_url
-                db.commit()
-            except Exception as e:
-                print(f"⚠️ Не удалось обновить обложку: {e}")
+        if existing_wishlist:
+            print("❌ Книга уже в вишлисте")
+            raise HTTPException(status_code=409, detail="Книга уже в вишлисте")
 
-    existing_wishlist = db.query(Вишлист).filter(
-        and_(
-            Вишлист.id_пользователя == user_id,
-            Вишлист.id_книги == created_book_id
+        # Добавляем в вишлист
+        wishlist_item = Вишлист(
+            id_пользователя=user_id,
+            id_книги=created_book_id,
+            дата_добавления=datetime.now().isoformat(),
+            приоритет=1
         )
-    ).first()
+        db.add(wishlist_item)
+        db.commit()
+        print(f"✅ Книга '{title}' добавлена в вишлист!")
+        print("=" * 60 + "\n")
 
-    if existing_wishlist:
-        raise HTTPException(status_code=409, detail="Книга уже в вишлисте")
+        return {
+            "message": f"Книга '{title}' добавлена в вишлист",
+            "book_id": created_book_id,
+            "status": "WANTS",
+            "in_wishlist": True
+        }
 
-    wishlist_item = Вишлист(
-        id_пользователя=user_id,
-        id_книги=created_book_id,
-        дата_добавления=datetime.now().isoformat(),
-        приоритет=1
-    )
-    db.add(wishlist_item)
-    db.commit()
-
-    return {
-        "message": f"Книга '{title}' добавлена в вишлист",
-        "book_id": created_book_id,
-        "status": "WANTS",
-        "in_wishlist": True
-    }
+    except HTTPException:
+        raise  # Пробрасываем HTTPException дальше
+    except Exception as e:
+        print(f"\n❌ ОШИБКА в add_to_wishlist: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        print("=" * 60 + "\n")
+        raise HTTPException(status_code=500, detail=f"Ошибка при добавлении в вишлист: {str(e)}")
 
 
 @router.delete("/user/{user_id}/wishlist/{book_id}", tags=["Вишлист"])
