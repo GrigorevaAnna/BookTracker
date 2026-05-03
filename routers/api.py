@@ -937,10 +937,14 @@ async def add_to_wishlist(
         )
         db.add(new_work)
 
-        # 👇 СОХРАНЯЕМ ОБЛОЖКУ НА GOOGLE DRIVE
-        final_cover_url = cover_url
+        # 👇 БЕЗОПАСНАЯ загрузка обложки
+        final_cover_url = cover_url or ""
         if cover_url:
-            final_cover_url = await download_and_upload_cover(book_id, cover_url)
+            try:
+                final_cover_url = await download_and_upload_cover(book_id, cover_url)
+            except Exception as e:
+                print(f"⚠️ Не удалось загрузить обложку на Google Drive: {e}")
+                final_cover_url = cover_url  # Оставляем исходную ссылку
 
         new_book = Книги(
             id_книги=book_id,
@@ -949,7 +953,7 @@ async def add_to_wishlist(
             Количество_страниц=pages or 0,
             Описание=description or "",
             ISBN=isbn or "",
-            Фото_обложки=final_cover_url,  # 👈 ссылка на Google Drive
+            Фото_обложки=final_cover_url,
             Язык=language or "Русский"
         )
         db.add(new_book)
@@ -982,7 +986,6 @@ async def add_to_wishlist(
         db.flush()
         created_book_id = book_id
         created_work_id = work_id
-
         db.commit()
     else:
         created_book_id = existing_book.id_книги
@@ -991,12 +994,14 @@ async def add_to_wishlist(
         ).first()
         created_work_id = content.id_произведения if content else None
 
-        # 👇 Если у книги нет обложки, но есть внешняя ссылка — сохраняем
+        # 👇 БЕЗОПАСНОЕ обновление обложки
         if cover_url and not existing_book.Фото_обложки:
-            final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
-            existing_book.Фото_обложки = final_cover_url
-            db.commit()
-
+            try:
+                final_cover_url = await download_and_upload_cover(created_book_id, cover_url)
+                existing_book.Фото_обложки = final_cover_url
+                db.commit()
+            except Exception as e:
+                print(f"⚠️ Не удалось обновить обложку: {e}")
 
     existing_wishlist = db.query(Вишлист).filter(
         and_(
