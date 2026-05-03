@@ -281,3 +281,37 @@ class Сессия_цитаты(Base):
 
     сессия = relationship("Сессии", back_populates="сессии_цитаты", overlaps="сессия")
     цитата = relationship("Цитаты", back_populates="сессии_цитаты", overlaps="цитата")
+
+
+class Рекомендации_реакции(Base):
+    __tablename__ = 'Рекомендации_реакции'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), nullable=False)
+    title = Column(String(500), nullable=False)
+    author = Column(String(255), nullable=False)
+    reaction = Column(String(20), nullable=False)  # 'liked' или 'disliked'
+    genre = Column(String(100))
+    summary = Column(Text)
+    reason = Column(Text)
+    created_at = Column(TIMESTAMP, server_default='CURRENT_TIMESTAMP')
+
+    пользователь = relationship("Аккаунты")
+
+
+from sqlalchemy.dialects.postgresql import JSONB
+
+
+class Кеш_рекомендаций(Base):
+    __tablename__ = 'Кеш_рекомендаций'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    id_пользователя = Column(String(50), ForeignKey('Аккаунты.id_пользователя', ondelete='CASCADE'), nullable=False)
+    books_json = Column(JSONB, nullable=False)
+    comment = Column(Text)
+    batch_number = Column(Integer, default=1)
+    is_used = Column(Boolean, default=False)
+    created_at = Column(TIMESTAMP, server_default='CURRENT_TIMESTAMP')
+    expires_at = Column(TIMESTAMP)
+
+    пользователь = relationship("Аккаунты")

@@ -13,12 +13,13 @@ from services.book_search import combined_search
 from services.google_drive import upload_cover_to_google_drive
 from models.pydantic_models import normalize_language
 from services.google_drive import download_and_upload_cover
+from services.recommendation_service import recommendation_service
 
 from database.database import get_db
 from models.sql_models import (
     Книги, Авторы, Произведения, Труд, Содержание,
     Аккаунты, Сессия_статус, Вишлист, Сессии, Цитаты,
-    Тэги, Связь_цитаты_тэги
+    Тэги, Связь_цитаты_тэги, Рекомендации_реакции, Кеш_рекомендаций
 )
 from models.pydantic_models import (
     ApiBookWithProgress, KotlinBook, KotlinUserBook, KotlinUser,
@@ -2438,4 +2439,430 @@ def get_pages_per_day(
         "days_with_reading": days_with_reading,
         "average_pages_per_day": avg_pages,
         "max_pages_in_one_day": max_pages
+    }
+
+
+# ============================================
+# РЕКОМЕНДАЦИИ (OpenAI + кеширование + предзагрузка)
+# ============================================
+
+@router.get("/user/{user_id}/recommendations", tags=["Рекомендации"])
+async def get_recommendations(
+        user_id: str,
+        count: int = Query(5, ge=1, le=10),
+        batch: int = Query(1, ge=1),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить персонализированные рекомендации книг с предзагрузкой.
+
+    Параметры:
+    - count: количество книг в одной партии (по умолчанию 5)
+    - batch: номер партии (1, 2, 3...)
+
+    Логика:
+    - batch=1: генерирует первую партию и в фоне готовит batch=2
+    - batch=2+: отдаёт из кеша (если готово) или генерирует
+
+    Алгоритм:
+    1. Собирает книги с высокой оценкой (4-5) из библиотеки
+    2. Собирает понравившиеся книги из предыдущих рекомендаций
+    3. Собирает не понравившиеся книги (учитывает, но избегает похожих)
+    4. Собирает все книги из библиотеки (не показывать, но жанры учитывать)
+    5. Отправляет в OpenAI для генерации рекомендаций
+    6. Кеширует результат на 24 часа
+    7. Обогащает обложками из разных источников
+    """
+    from services.recommendation_service import recommendation_service
+
+    # Проверяем существование пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # ================================================================
+    # 1. Собираем книги с высокой оценкой (4-5) из библиотеки
+    # ================================================================
+    highly_rated = db.query(Сессия_статус, Произведения).join(
+        Произведения,
+        Сессия_статус.id_произведения == Произведения.id_произведения
+    ).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.Рейтинг >= 4.0
+        )
+    ).all()
+
+    highly_rated_books = []
+    for status, work in highly_rated:
+        content = db.query(Содержание).filter(
+            Содержание.id_произведения == work.id_произведения
+        ).first()
+        if content:
+            book = db.query(Книги).filter(Книги.id_книги == content.id_книги).first()
+            if book:
+                highly_rated_books.append({
+                    "title": book.Название,
+                    "author": book.Автор,
+                    "rating": status.Рейтинг,
+                    "genre": book.Жанр
+                })
+
+    # ================================================================
+    # 2. Собираем понравившиеся книги из предыдущих рекомендаций
+    # ================================================================
+    liked_reactions = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.reaction == "liked"
+        )
+    ).all()
+
+    liked_books = []
+    for reaction in liked_reactions:
+        liked_books.append({
+            "title": reaction.title,
+            "author": reaction.author,
+            "genre": reaction.genre
+        })
+
+    # ================================================================
+    # 3. Собираем не понравившиеся книги из рекомендаций (ТОЛЬКО дизлайки)
+    # ================================================================
+    disliked_reactions = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.reaction == "disliked"
+        )
+    ).all()
+
+    disliked_books = []
+    for reaction in disliked_reactions:
+        disliked_books.append({
+            "title": reaction.title,
+            "author": reaction.author,
+            "genre": reaction.genre
+        })
+
+    # ================================================================
+    # 4. Собираем ВСЕ книги из библиотеки (просто чтобы не показывать их)
+    #    НЕ добавляем в disliked! Они просто в библиотеке.
+    # ================================================================
+    all_user_books = set()
+    user_statuses = db.query(Сессия_статус).filter(
+        Сессия_статус.id_пользователя == user_id
+    ).all()
+
+    for status in user_statuses:
+        work = db.query(Произведения).filter(
+            Произведения.id_произведения == status.id_произведения
+        ).first()
+        if work:
+            content = db.query(Содержание).filter(
+                Содержание.id_произведения == work.id_произведения
+            ).first()
+            if content:
+                book = db.query(Книги).filter(Книги.id_книги == content.id_книги).first()
+                if book:
+                    book_key = f"{book.Название} — {book.Автор}"
+                    if book_key not in all_user_books:
+                        all_user_books.add(book_key)
+                        # Добавляем в disliked ТОЛЬКО для того чтобы исключить из показа
+                        # Но нейросеть понимает что это НЕ дизлайк, а просто "уже есть"
+                        disliked_books.append({
+                            "title": book.Название,
+                            "author": book.Автор
+                        })
+
+    # ================================================================
+    # 5. Логируем статистику
+    # ================================================================
+    print(f"\n{'=' * 60}")
+    print(f"📊 ЗАПРОС РЕКОМЕНДАЦИЙ")
+    print(f"👤 Пользователь: {user_id}")
+    print(f"📦 Партия: {batch}")
+    print(f"⭐ Высоко оценено: {len(highly_rated_books)}")
+    print(f"👍 Лайков рекомендаций: {len(liked_books)}")
+    print(f"👎 Дизлайков: {len(disliked_reactions)}")
+    print(f"📚 Книг в библиотеке: {len(all_user_books)}")
+    print(f"🔢 Запрошено книг: {count}")
+    print(f"{'=' * 60}\n")
+
+    # ================================================================
+    # 6. Получаем рекомендации (из кеша или генерируем)
+    # ================================================================
+    result = await recommendation_service.get_or_generate_recommendations(
+        db=db,
+        user_id=user_id,
+        liked_books=liked_books,
+        disliked_books=disliked_books,
+        highly_rated_books=highly_rated_books,
+        count=count,
+        batch=batch
+    )
+
+    # ================================================================
+    # 7. Для каждой книги проверяем предыдущие реакции
+    # ================================================================
+    for book in result.get("recommendations", {}).get("books", []):
+        existing_reaction = db.query(Рекомендации_реакции).filter(
+            and_(
+                Рекомендации_реакции.id_пользователя == user_id,
+                Рекомендации_реакции.title == book["title"],
+                Рекомендации_реакции.author == book["author"]
+            )
+        ).first()
+        book["previous_reaction"] = existing_reaction.reaction if existing_reaction else None
+
+    # ================================================================
+    # 8. Возвращаем результат
+    # ================================================================
+    return {
+        **result,  # recommendations + has_more + next_batch
+        "user_profile": {
+            "highly_rated_count": len(highly_rated_books),
+            "liked_count": len(liked_books),
+            "disliked_count": len(disliked_reactions),
+            "total_books_in_library": len(all_user_books)
+        },
+        "current_batch": batch,
+        "books_in_current_batch": len(result.get("recommendations", {}).get("books", []))
+    }
+
+
+@router.post("/user/{user_id}/recommendations/reaction", tags=["Рекомендации"])
+async def save_recommendation_reaction(
+        user_id: str,
+        title: str = Query(...),
+        author: str = Query(...),
+        reaction: str = Query(..., regex="^(liked|disliked)$"),
+        genre: Optional[str] = Query(None),
+        summary: Optional[str] = Query(None),
+        reason: Optional[str] = Query(None),
+        db: Session = Depends(get_db)
+):
+    """
+    Сохранить реакцию пользователя на рекомендованную книгу
+
+    reaction:
+    - liked (нравится) — будет учтено в следующих рекомендациях
+    - disliked (не нравится) — похожие книги будут исключены
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Проверяем, не было ли уже реакции
+    existing = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.title == title,
+            Рекомендации_реакции.author == author
+        )
+    ).first()
+
+    if existing:
+        # Обновляем существующую реакцию
+        existing.reaction = reaction
+        if genre:
+            existing.genre = genre
+        if summary:
+            existing.summary = summary
+        if reason:
+            existing.reason = reason
+        message = f"Реакция обновлена на '{reaction}'"
+    else:
+        # Создаём новую реакцию
+        new_reaction = Рекомендации_реакции(
+            id_пользователя=user_id,
+            title=title,
+            author=author,
+            reaction=reaction,
+            genre=genre,
+            summary=summary,
+            reason=reason
+        )
+        db.add(new_reaction)
+        message = f"Реакция '{reaction}' сохранена"
+
+    db.commit()
+
+    # Очищаем кеш рекомендаций при новой реакции
+    # (чтобы следующие рекомендации учли изменения)
+    db.query(Кеш_рекомендаций).filter(
+        Кеш_рекомендаций.id_пользователя == user_id
+    ).delete()
+    db.commit()
+
+    return {
+        "message": message,
+        "reaction": reaction,
+        "title": title,
+        "author": author,
+        "cache_cleared": True
+    }
+
+
+@router.get("/user/{user_id}/recommendations/history", tags=["Рекомендации"])
+async def get_recommendation_history(
+        user_id: str,
+        reaction: Optional[str] = Query(None, regex="^(liked|disliked)$"),
+        limit: int = Query(50, ge=1, le=100),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить историю реакций на рекомендации
+
+    Фильтр по reaction:
+    - liked (только понравившиеся)
+    - disliked (только не понравившиеся)
+    - без фильтра (все)
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    query = db.query(Рекомендации_реакции).filter(
+        Рекомендации_реакции.id_пользователя == user_id
+    )
+
+    if reaction:
+        query = query.filter(Рекомендации_реакции.reaction == reaction)
+
+    reactions = query.order_by(
+        Рекомендации_реакции.created_at.desc()
+    ).limit(limit).all()
+
+    return {
+        "total": len(reactions),
+        "reactions": [
+            {
+                "title": r.title,
+                "author": r.author,
+                "reaction": r.reaction,
+                "genre": r.genre,
+                "summary": r.summary,
+                "reason": r.reason,
+                "date": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in reactions
+        ]
+    }
+
+
+@router.get("/user/{user_id}/recommendations/stats", tags=["Рекомендации"])
+async def get_recommendation_stats(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Получить статистику по рекомендациям
+    """
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Общая статистика
+    total = db.query(Рекомендации_реакции).filter(
+        Рекомендации_реакции.id_пользователя == user_id
+    ).count()
+
+    liked_count = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.reaction == "liked"
+        )
+    ).count()
+
+    disliked_count = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.reaction == "disliked"
+        )
+    ).count()
+
+    # Кешированные партии
+    cached_batches = db.query(Кеш_рекомендаций).filter(
+        and_(
+            Кеш_рекомендаций.id_пользователя == user_id,
+            Кеш_рекомендаций.expires_at > datetime.now()
+        )
+    ).count()
+
+    # Популярные жанры среди понравившихся
+    liked_genres = db.query(
+        Рекомендации_реакции.genre,
+        func.count().label('count')
+    ).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.reaction == "liked",
+            Рекомендации_реакции.genre.isnot(None),
+            Рекомендации_реакции.genre != ""
+        )
+    ).group_by(Рекомендации_реакции.genre).order_by(
+        func.count().desc()
+    ).all()
+
+    return {
+        "total_reactions": total,
+        "liked": liked_count,
+        "disliked": disliked_count,
+        "like_rate": round(liked_count / total * 100, 1) if total > 0 else 0,
+        "cached_batches_available": cached_batches,
+        "favorite_genres": [
+            {"genre": genre, "count": count}
+            for genre, count in liked_genres
+        ]
+    }
+
+
+@router.delete("/user/{user_id}/recommendations/reaction", tags=["Рекомендации"])
+async def delete_recommendation_reaction(
+        user_id: str,
+        title: str = Query(...),
+        author: str = Query(...),
+        db: Session = Depends(get_db)
+):
+    """Удалить реакцию на книгу и очистить кеш"""
+    reaction = db.query(Рекомендации_реакции).filter(
+        and_(
+            Рекомендации_реакции.id_пользователя == user_id,
+            Рекомендации_реакции.title == title,
+            Рекомендации_реакции.author == author
+        )
+    ).first()
+
+    if not reaction:
+        raise HTTPException(status_code=404, detail="Реакция не найдена")
+
+    db.delete(reaction)
+
+    # Очищаем кеш
+    db.query(Кеш_рекомендаций).filter(
+        Кеш_рекомендаций.id_пользователя == user_id
+    ).delete()
+
+    db.commit()
+
+    return {
+        "message": f"Реакция на '{title}' удалена",
+        "cache_cleared": True
+    }
+
+
+@router.delete("/user/{user_id}/recommendations/cache", tags=["Рекомендации"])
+async def clear_recommendations_cache(
+        user_id: str,
+        db: Session = Depends(get_db)
+):
+    """Очистить кеш рекомендаций (для принудительного обновления)"""
+    deleted = db.query(Кеш_рекомендаций).filter(
+        Кеш_рекомендаций.id_пользователя == user_id
+    ).delete()
+    db.commit()
+
+    return {
+        "message": f"Кеш очищен",
+        "deleted_entries": deleted
     }
