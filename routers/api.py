@@ -895,6 +895,91 @@ def get_user_wishlist(
     return result
 
 
+@router.post("/user/{user_id}/move-to-wishlist/{book_id}", tags=["Вишлист"])
+async def move_to_wishlist(
+        user_id: str,
+        book_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Перемещает книгу в вишлист.
+
+    Логика:
+    - Если книга уже в библиотеке → меняет статус на WANTS и добавляет в вишлист
+    - Если книги нет в библиотеке → просто добавляет в вишлист
+    - Если уже в вишлисте → возвращает ошибку
+    """
+    print(f"\n{'=' * 60}")
+    print(f"📥 MOVE-TO-WISHLIST: user={user_id}, book={book_id}")
+    print(f"{'=' * 60}\n")
+
+    # Проверяем пользователя
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Проверяем книгу
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    # Проверяем, есть ли уже в вишлисте
+    existing_wishlist = db.query(Вишлист).filter(
+        and_(
+            Вишлист.id_пользователя == user_id,
+            Вишлист.id_книги == book_id
+        )
+    ).first()
+
+    if existing_wishlist:
+        raise HTTPException(status_code=409, detail="Книга уже в вишлисте")
+
+    # Получаем произведение через Содержание
+    content = db.query(Содержание).filter(
+        Содержание.id_книги == book_id
+    ).first()
+
+    if not content:
+        raise HTTPException(status_code=404, detail="Связь книги с произведением не найдена")
+
+    work_id = content.id_произведения
+
+    # Проверяем, есть ли книга в библиотеке (Сессия_статус)
+    existing_status = db.query(Сессия_статус).filter(
+        and_(
+            Сессия_статус.id_пользователя == user_id,
+            Сессия_статус.id_произведения == work_id
+        )
+    ).first()
+
+    if existing_status:
+        # Книга есть в библиотеке → меняем статус на WANTS
+        old_status = existing_status.Статус
+        existing_status.Статус = "Хочу"  # статус вишлиста
+        existing_status.updated_at = datetime.now()
+        print(f"   🔄 Статус изменён: {old_status} → Хочу")
+
+    # Добавляем в вишлист
+    wishlist_item = Вишлист(
+        id_пользователя=user_id,
+        id_книги=book_id,
+        дата_добавления=datetime.now().isoformat(),
+        приоритет=1
+    )
+    db.add(wishlist_item)
+    db.commit()
+
+    print(f"✅ Книга '{book.Название}' добавлена в вишлист")
+
+    return {
+        "message": f"Книга '{book.Название}' добавлена в вишлист",
+        "book_id": book_id,
+        "status": "WANTS",
+        "in_wishlist": True,
+        "previous_status": existing_status.Статус if existing_status else None
+    }
+
+
 @router.post("/user/{user_id}/add-to-wishlist", tags=["Вишлист"])
 async def add_to_wishlist(
         user_id: str,
