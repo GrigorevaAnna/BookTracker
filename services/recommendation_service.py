@@ -582,7 +582,19 @@ class BookRecommendationService:
             title = book.get("title", "")
             author = book.get("author", "")
             db_book = db.query(Книги).filter(Книги.Название.ilike(f"%{title}%")).first()
-            cover_url = db_book.Фото_обложки if db_book and db_book.Фото_обложки else await self._search_book_cover(title, author, i)
+
+            # Ищем обложку
+            cover_url = None
+            if db_book and db_book.Фото_обложки:
+                cover_url = db_book.Фото_обложки
+            else:
+                cover_url = await self._search_book_cover(title, author, i)
+
+            # 👇 СОХРАНЯЕМ обложку в БД если книга есть
+            if db_book and cover_url and not db_book.Фото_обложки:
+                db_book.Фото_обложки = cover_url
+                db.commit()
+
             enriched.append({
                 "title": title, "author": author,
                 "summary": book.get("summary", ""), "genre": book.get("genre", ""),
