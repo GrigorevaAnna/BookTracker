@@ -12,12 +12,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+# 🔑 DEEPSEEK API
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-print(f"🔑 OpenAI API ключ: {'✅ Найден' if OPENAI_API_KEY else '❌ Не найден'}")
-if not OPENAI_API_KEY:
-    print("💡 Добавьте в .env: OPENAI_API_KEY=sk-proj-...")
+if DEEPSEEK_API_KEY:
+    API_PROVIDER = "deepseek"
+    API_KEY = DEEPSEEK_API_KEY
+    print(f"🔑 DeepSeek API ключ: ✅ Найден")
+    print("🌐 Используем DeepSeek (БЕСПЛАТНО, работает в России)")
+else:
+    API_PROVIDER = None
+    API_KEY = None
+    print("❌ DeepSeek API ключ не найден!")
+    print("💡 Добавьте в .env: DEEPSEEK_API_KEY=sk-...")
 
 
 def fix_cover_url(url: str) -> str:
@@ -38,11 +46,12 @@ def fix_cover_url(url: str) -> str:
 
 
 class BookRecommendationService:
-    """Сервис рекомендаций книг через OpenAI с умным кешированием"""
+    """Сервис рекомендаций книг через DeepSeek с умным кешированием"""
 
     def __init__(self):
-        self.api_key = OPENAI_API_KEY
-        self.api_url = OPENAI_API_URL
+        self.provider = API_PROVIDER
+        self.api_key = API_KEY
+        self.api_url = DEEPSEEK_API_URL if self.api_key else None
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def _get_lock(self, user_id: str) -> asyncio.Lock:
@@ -55,7 +64,7 @@ class BookRecommendationService:
     # ================================================================
 
     async def _search_book_cover(self, title: str, author: str, book_index: int = 0) -> Optional[str]:
-        """Ищет обложку: Google Books → OpenLibrary → DuckDuckGo → Google Images → Wikipedia"""
+        """Ищет обложку: Google Books → OpenLibrary → DuckDuckGo → Google Images"""
         print(f"      🔍 [{book_index}] Ищу обложку: {title[:50]}...")
 
         # Google Books API
@@ -166,19 +175,11 @@ class BookRecommendationService:
         return None
 
     # ================================================================
-    # ГЕНЕРАЦИЯ РЕКОМЕНДАЦИЙ
+    # СБОР ДАННЫХ ДЛЯ ПРОМПТА
     # ================================================================
 
-    async def _generate_recommendations_batch(
-            self, db: Session, user_id: str,
-            liked_books: List[Dict], disliked_books: List[Dict],
-            highly_rated_books: List[Dict], count: int = 5, batch_number: int = 1
-    ) -> Dict[str, Any]:
-        """Генерирует одну партию рекомендаций через OpenAI"""
-
-        if not self.api_key:
-            return self._get_fallback_recommendations(count)
-
+    def _build_prompt_data(self, liked_books, disliked_books, highly_rated_books):
+        """Собирает данные для промпта"""
         user_likes = []
         for book in highly_rated_books:
             user_likes.append({
@@ -214,14 +215,45 @@ class BookRecommendationService:
 
         dislikes_parts = [f"👎 {b['title']} — {b['author']} (жанр: {b['genre']})" for b in user_dislikes]
 
-        liked_text = "\n".join(likes_parts) if likes_parts else "Нет данных"
-        disliked_text = "\n".join(dislikes_parts) if dislikes_parts else "Нет"
-        library_text = "\n".join([f"📚 {b}" for b in sorted(books_in_library)]) if books_in_library else "Нет"
+        # Обрезаем если слишком много
+        likes_parts = likes_parts[:10]
+        dislikes_parts = dislikes_parts[:10]
+        library_list = sorted(books_in_library)[:15]
+
+        return {
+            "liked_text": "\n".join(likes_parts) if likes_parts else "Нет данных",
+            "disliked_text": "\n".join(dislikes_parts) if dislikes_parts else "Нет",
+            "library_text": "\n".join([f"📚 {b}" for b in library_list]) if library_list else "Нет",
+            "user_dislikes": user_dislikes[:10],
+            "books_in_library": books_in_library
+        }
+
+    # ================================================================
+    # ГЕНЕРАЦИЯ РЕКОМЕНДАЦИЙ ЧЕРЕЗ DEEPSEEK
+    # ================================================================
+
+    async def _generate_recommendations_batch(
+            self, db: Session, user_id: str,
+            liked_books: List[Dict], disliked_books: List[Dict],
+            highly_rated_books: List[Dict], count: int = 5, batch_number: int = 1
+    ) -> Dict[str, Any]:
+        """Генерирует партию рекомендаций через DeepSeek"""
+
+        if not self.api_key:
+            print("❌ Нет API ключа DeepSeek")
+            return self._get_fallback_recommendations(count)
+
+        data = self._build_prompt_data(liked_books, disliked_books, highly_rated_books)
 
         print(f"\n{'='*60}")
-        print(f"🎯 OPENAI API (партия {batch_number}) | {user_id}")
-        print(f"❤️{len(highly_rated_books)} 👍{len(liked_books)} 👎{len(user_dislikes)} 📚{len(books_in_library)}")
+        print(f"🎯 DEEPSEEK API (партия {batch_number}) | {user_id}")
+        print(f"❤️{len(highly_rated_books)} 👍{len(liked_books)} 👎{len(data['user_dislikes'])} 📚{len(data['books_in_library'])}")
         print(f"{'='*60}\n")
+
+        return await self._generate_via_deepseek(data, count, batch_number)
+
+    async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int) -> Dict[str, Any]:
+        """Генерация через DeepSeek с поддержкой JSON response"""
 
         system_prompt = f"""Ты — лучший книжный ассистент в мире. 
 
@@ -235,6 +267,8 @@ class BookRecommendationService:
   Бриттани Ш. Черри, Эрин Моргенштерн, Сара Дж. Маас, Ребекка Яррос, 
   Дженнифер Л. Арментроут, Елена Армас и многих других
 
+Твоя задача — проанализировать вкусы пользователя и порекомендовать {count} новых книг.
+
 ВАЖНЫЕ ПРАВИЛА:
 1. ❤️ и 👍 = главный сигнал. Рекомендуй похожие по жанру, настроению, тропам
 2. 👎 = анти-сигнал. НЕ рекомендуй эти книги и избегай похожих на них
@@ -247,62 +281,106 @@ class BookRecommendationService:
 
 СТИЛЬ:
 - Пиши живым, увлекательным языком (как книжный блогер)
-- Описания должны быть заманчивыми
-- В reason указывай конкретные тропы и связь
+- Описания должны быть заманчивыми, интригующими
+- В reason указывай конкретные тропы и связь с любимыми книгами пользователя
 
 Это партия №{batch_number}. Предложи НОВЫЕ книги (не из предыдущих партий).
 
 ❤️👍 ЧТО НРАВИТСЯ:
-{liked_text}
+{data['liked_text']}
 
 👎 ЧТО НЕ НРАВИТСЯ (избегай похожих):
-{disliked_text}
+{data['disliked_text']}
 
 📚 В БИБЛИОТЕКЕ (не показывай, но жанры учитывай):
-{library_text}
+{data['library_text']}
 
-ФОРМАТ ОТВЕТА — СТРОГО JSON:
-{{"comment": "...", "books": [{{"title": "...", "author": "...", "summary": "...", "genre": "...", "reason": "..."}}]}}"""
-
-        user_message = f"Порекомендуй мне {count} книг (партия {batch_number})!"
+Верни СТРОГО JSON (без markdown):
+{{"comment": "персональный комментарий на русском", "books": [{{"title": "Название", "author": "Автор", "summary": "Описание 2-3 предложения", "genre": "Жанр", "reason": "Почему подходит"}}]}}"""
 
         try:
+            print("📡 Отправляю запрос к DeepSeek API...")
+
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
                     self.api_url,
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {self.api_key}"
+                    },
                     json={
-                        "model": "gpt-4o-mini",
+                        "model": "deepseek-chat",
                         "messages": [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_message}
+                            {"role": "user", "content": f"Порекомендуй мне {count} книг на основе моих предпочтений. Я хочу реально крутые, популярные книги, которые мне точно понравятся!"}
                         ],
-                        "temperature": 0.8, "max_tokens": 3000,
+                        "temperature": 0.7,
+                        "max_tokens": 3000,
                         "response_format": {"type": "json_object"}
                     }
                 )
+
+                print(f"📥 Статус ответа: {response.status_code}")
+
                 if response.status_code == 200:
-                    data = response.json()
-                    content = data['choices'][0]['message']['content']
+                    data_resp = response.json()
+
+                    usage = data_resp.get('usage', {})
+                    print(f"💰 Токены: {usage.get('total_tokens', '?')} "
+                          f"(запрос: {usage.get('prompt_tokens', '?')}, "
+                          f"ответ: {usage.get('completion_tokens', '?')})")
+
+                    content = data_resp['choices'][0]['message']['content']
+
+                    # Парсим JSON
                     result = json.loads(content)
-                    print(f"✅ Партия {batch_number}: {len(result.get('books', []))} книг")
+                    books_count = len(result.get('books', []))
+
+                    print(f"✅ DeepSeek вернул {books_count} рекомендаций!")
+                    print(f"💬 Комментарий: {result.get('comment', '')[:150]}...")
+
+                    for i, book in enumerate(result.get('books', []), 1):
+                        print(f"   {i}. {book.get('title')} — {book.get('author')}")
+                        print(f"      Жанр: {book.get('genre')}")
+                        print(f"      Почему: {book.get('reason', '')[:100]}...")
+
                     return result
-                else:
-                    print(f"❌ Ошибка API: {response.status_code}")
+
+                elif response.status_code == 402:
+                    print("⚠️ DeepSeek: закончились бесплатные токены")
                     return self._get_fallback_recommendations(count)
+                elif response.status_code == 429:
+                    print("⚠️ DeepSeek: слишком много запросов")
+                    return self._get_fallback_recommendations(count)
+                else:
+                    error_text = response.text[:300]
+                    print(f"❌ DeepSeek ошибка {response.status_code}: {error_text}")
+                    return self._get_fallback_recommendations(count)
+
+        except httpx.ConnectError:
+            print("❌ Ошибка подключения к DeepSeek API")
+            return self._get_fallback_recommendations(count)
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ DeepSeek ошибка: {type(e).__name__}: {e}")
+            traceback.print_exc()
             return self._get_fallback_recommendations(count)
 
     def _get_fallback_recommendations(self, count: int = 5) -> Dict[str, Any]:
+        """Запасные рекомендации"""
         all_books = [
-            {"title": "Три тела", "author": "Лю Цысинь", "summary": "Первый контакт с инопланетной цивилизацией.", "genre": "Научная фантастика", "reason": "Масштабное миростроение."},
-            {"title": "Песнь льда и пламени", "author": "Джордж Мартин", "summary": "Борьба за власть в фэнтезийном мире.", "genre": "Фэнтези", "reason": "Политические интриги."},
-            {"title": "Семь мужей Эвелин Хьюго", "author": "Тейлор Дженкинс Рейд", "summary": "История голливудской звезды.", "genre": "Романтическая проза", "reason": "Эмоциональная история."},
-            {"title": "Проект «Аве Мария»", "author": "Энди Вейер", "summary": "Астронавт спасает человечество.", "genre": "Научная фантастика", "reason": "Умная фантастика."},
-            {"title": "Тайная история", "author": "Донна Тартт", "summary": "Студенты и убийство.", "genre": "Психологический триллер", "reason": "Напряжённый сюжет."}
+            {"title": "Три тела", "author": "Лю Цысинь", "summary": "Научно-фантастический роман о первом контакте с инопланетной цивилизацией. Масштабная история, охватывающая десятилетия.", "genre": "Научная фантастика", "reason": "Глубокий научно-фантастический роман с масштабным миростроением."},
+            {"title": "Песнь льда и пламени", "author": "Джордж Мартин", "summary": "Эпическая сага о борьбе за власть в мире, полном политических интриг, магии и драконов.", "genre": "Фэнтези", "reason": "Проработанный мир и сложные персонажи."},
+            {"title": "Семь мужей Эвелин Хьюго", "author": "Тейлор Дженкинс Рейд", "summary": "История голливудской иконы, которая решается рассказать правду о своей жизни и семи браках.", "genre": "Романтическая проза", "reason": "Эмоциональная история о любви и выборе."},
+            {"title": "Проект «Аве Мария»", "author": "Энди Вейер", "summary": "Астронавт просыпается на космическом корабле в миллионах километров от Земли.", "genre": "Научная фантастика", "reason": "Умная фантастика с юмором и наукой."},
+            {"title": "Тайная история", "author": "Донна Тартт", "summary": "Группа студентов элитного колледжа погружается в мир античности и совершает убийство.", "genre": "Психологический триллер", "reason": "Напряжённый психологический роман."},
+            {"title": "Ночной цирк", "author": "Эрин Моргенштерн", "summary": "Таинственный цирк появляется только ночью. Два иллюзиониста связаны магическим соревнованием.", "genre": "Магический реализм", "reason": "Атмосферное фэнтези с романтикой."},
+            {"title": "Цветы для Элджернона", "author": "Дэниел Киз", "summary": "Умственно отсталый человек становится гением после научного эксперимента.", "genre": "Научная фантастика", "reason": "Глубокое философское произведение."},
+            {"title": "Марсианин", "author": "Энди Вейер", "summary": "Астронавта забывают на Марсе. Используя науку и смекалку, он пытается выжить.", "genre": "Научная фантастика", "reason": "Оптимистичная фантастика с наукой."},
+            {"title": "Щегол", "author": "Донна Тартт", "summary": "После взрыва в музее мальчик забирает картину. Эта кража определяет его жизнь.", "genre": "Современная проза", "reason": "Масштабная история об искусстве и искуплении."},
+            {"title": "Жена путешественника во времени", "author": "Одри Ниффенеггер", "summary": "История любви человека, который непроизвольно путешествует во времени.", "genre": "Романтическая фантастика", "reason": "Уникальное сочетание фантастики и романтики."}
         ]
-        return {"comment": "На основе ваших предпочтений.", "books": all_books[:count]}
+        print(f"📚 Запасные рекомендации ({min(count, len(all_books))} книг)")
+        return {"comment": "На основе ваших предпочтений я подобрал эти книги.", "books": all_books[:count]}
 
     # ================================================================
     # УМНОЕ КЕШИРОВАНИЕ
@@ -444,7 +522,7 @@ class BookRecommendationService:
                 result = {"comment": recommendations.get("comment", ""), "books": filtered_books if len(filtered_books) >= 3 else recommendations.get("books", []), "from_cache": False}
                 self._save_to_cache(db, user_id, result, batch)
 
-            # Предзагрузка следующей партии
+            # Предзагрузка следующей партии с задержкой
             next_batch = batch + 1
             if next_batch <= 10:
                 next_cached = db.query(Кеш_рекомендаций).filter(
@@ -452,7 +530,11 @@ class BookRecommendationService:
                          Кеш_рекомендаций.expires_at > datetime.now())
                 ).first()
                 if not next_cached:
-                    asyncio.create_task(self._preload_next_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, next_batch))
+                    asyncio.create_task(
+                        self._preload_with_delay(db, user_id, liked_books, disliked_books,
+                                                  highly_rated_books, count, next_batch, delay=15)
+                    )
+                    print(f"🔄 Фоновая загрузка партии {next_batch} запланирована (через 15с)")
 
             # Обогащаем обложками
             enriched = await self.search_books_in_db(db, result)
@@ -461,6 +543,13 @@ class BookRecommendationService:
             await self._clean_viewed_from_cache(db, user_id)
 
             return {"recommendations": enriched, "has_more": batch < 10, "next_batch": next_batch if batch < 10 else None}
+
+    async def _preload_with_delay(self, db, user_id, liked_books, disliked_books,
+                                   highly_rated_books, count, batch_number, delay=15):
+        """Фоновая загрузка с задержкой"""
+        await asyncio.sleep(delay)
+        await self._preload_next_batch(db, user_id, liked_books, disliked_books,
+                                        highly_rated_books, count, batch_number)
 
     async def _preload_next_batch(self, db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number):
         from models.sql_models import Кеш_рекомендаций

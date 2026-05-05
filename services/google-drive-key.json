@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "booktracker-493410",
+  "private_key_id": "e2f2c0ee2734abe93f3368e81493c34b93f1e34c",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3sg1pCdRjGZGr\nihbzBYa6byuJj4f36iXJner86CVnU3OAvdBlsvqCJAJuDPrI4ihyCP8pNe0/LM7H\n2SyNqpajRO5MSgsNBrjwm2lorfAHBpWJXrFZSpYVUOP5XQeIzlQjSdaRbrMhjyMW\nYshfLuTPhd1MUl2DX0Bi9jqvrNye+WEyN/cn3Nfcw+X05AlY901xEfF1KpHINavt\nncDXK59A0E8ZvpHpYIyHlJYRm659adamo+dTx5zgaWBeDfNXiZHsD2ic3RgJyE40\nMWayDdWPjrSvJ5cFoIz4g4t0d1t8rwtC+0ivSpj1fDMs3TMjLghb4XuVAca0Xz4w\nsdXN9pJHAgMBAAECggEAT4noJpgb/4D9wzH6t+WnragfSOP+MsmO7RrUugdm0rOe\nqpsF1lNGBv3Ck5ZJLJxIeQAOQ/DWtmkXbA9MLFc1/KIHML9Kw6wqffw9CxdtfA1M\nyHtY/Vm/XKF25O10Krd0VQdOwhAVvi01OycwrY4ngvfql3Z+iTjAL1mAlbqamLaU\njexCkBGbzP40S33RoL65ByBTjQ0wKqlxSUvFemie958R3LRhPWjzAlgo7pQitJA0\nhLkucIdYO4nZzurvmw5AwFR0jxY/yx1xzsx5Lq02kqULx610rxVhFA7JSEAFGVEi\nI50h2vlxYdUULgwcg1MQGpaJAUh8EIsJD6am+60VOQKBgQDfoRDZ8iDKA5YfaAo7\niGBSLe4eUExdZE1WREZCfZONeeek85oFWvnz4mYzElmbchAtZTH1AcLR6ElGwtst\ni7I6qoKVIJw34slrvkI2CN0BPMN/GIbYydMhygG0b9opU9rIMaGNhNX/ViRvlWSI\nfco9B0g6CPGkvVcRoOqs78yocwKBgQDSSS6LGLPDvcD0/G0j5p3pduR4cIYSnZNo\nX8yDFactR/EDm218zDtOz8Bp2METMP9PqjRGXcQ6mdniJ2JPhqFeG2ficBzDmKm7\nfr7mFGgJvYd//YPFq9/knVqvG2iLQG+fz1j6ZVONMD/P551g61hzVHdykizTmtwG\n5nCl1pN93QKBgDrqgjgJNF5Eh56KmHeKvGWqOBvAZ/4K2N0ra59E2kThowewLhnP\nGB8KvIYkBXuQl3Z+PKUh66PFoNiFqZzcOv59wZ1sU/vdQdei7mqx9xfGXHL1kUE4\nGunCAKT6+uz8bJ1lhfx0zLRSi5LiNvRGv6tIadzwUklmoLPCQ1GAc9jFAoGBALkU\n9EQ0/7OexcBalGzuw7oCjOB8mWS1EFLjTotpeXTfRwAXwuv+jYy2SfJfdsA/dddW\nRSBR0y6Izz6/z0WTh1/e2zZv2sFFEs8VpUu4VkGMcUBzj5Fhz3PWE0Tf6Mn3csfD\npdrtZ/ZyqxeAEgKF4ZnQlDlg8tdkC5h/JlKwY6x5AoGBAMzVKFoWfoIMJCtfkMlW\nINGPHCrVuGozmWNgwk74lIbkdAopKTivsG7t4qQvyiGswOvgkmDOTkakRFCr5+Qe\n037NRdObFPGoGz75QyLtoQ1gI99wnP7ktg0o32ier/spX+if2bnlvJswJfHUrkbI\nkGxa3KcgcNH9JyATSc1EXAj5\n-----END PRIVATE KEY-----\n",
+  "client_email": "booktracker-drive@booktracker-493410.iam.gserviceaccount.com",
+  "client_id": "114452478363268483550",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/booktracker-drive%40booktracker-493410.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
