@@ -151,6 +151,37 @@ async def update_user_profile(
     return {"message": "Профиль обновлён"}
 
 
+@router.post("/users/login", tags=["Пользователи"])
+async def login_user(
+        email: str,
+        password: str,
+        db: Session = Depends(get_db)
+):
+    """Вход пользователя по email и паролю"""
+    user = db.query(Аккаунты).filter(Аккаунты.Почта == email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь с таким email не найден")
+
+    if user.Пароль != password:
+        raise HTTPException(status_code=401, detail="Неверный пароль")
+
+    # Обновляем дату последнего входа
+    user.last_login = datetime.now()
+    db.commit()
+
+    return {
+        "user_id": user.id_пользователя,
+        "nickname": user.Никнейм,
+        "email": user.Почта,
+        "reading_goal": user.reading_goal,
+        "pages_per_day_goal": user.pages_per_day_goal,
+        "avatar_url": user.Фото or "",
+        "message": "Вход выполнен успешно"
+    }
+
+
+
 # ============================================
 # БИБЛИОТЕКА
 # ============================================
