@@ -9,7 +9,7 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from sqlalchemy import and_
+from sqlalchemy import and_, func
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,7 +48,7 @@ def fix_cover_url(url: str) -> str:
 
 
 class BookRecommendationService:
-    """Сервис рекомендаций книг через DeepSeek + Google Books фильтрация"""
+    """Сервис рекомендаций книг: коллаборативная фильтрация + DeepSeek"""
 
     def __init__(self):
         self.provider = API_PROVIDER
@@ -177,104 +177,166 @@ class BookRecommendationService:
         return None
 
     # ================================================================
-    # GOOGLE BOOKS — ПОИСК НОВИНОК ПО ЖАНРУ
+    # КОЛЛАБОРАТИВНАЯ ФИЛЬТРАЦИЯ
     # ================================================================
 
-    async def _search_google_books_by_genre(self, genre: str, count: int = 3) -> List[Dict]:
-        """Ищет книги в Google Books по КАТЕГОРИИ (жанру), а не по ключевым словам"""
+    async def _get_collaborative_recommendations(
+        self, db: Session, user_id: str, count: int = 5
+    ) -> List[Dict]:
+        """Рекомендации от похожих пользователей"""
+        from models.sql_models import Сессия_статус, Произведения, Книги, Содержание, Авторы, Труд
 
-        # Google Books категории на английском
-        genre_subjects = {
-            "Dark romance": "Fiction / Romance / Contemporary",
-            "Городское фэнтези": "Fiction / Fantasy / Urban",
-            "Психологический триллер": "Fiction / Thrillers / Psychological",
-            "Романтическая комедия": "Fiction / Romance / Romantic Comedy",
-            "Романтическая проза": "Fiction / Romance / Contemporary",
-            "Фэнтези": "Fiction / Fantasy / Epic",
-            "Научная фантастика": "Fiction / Science Fiction",
-            "Магический реализм": "Fiction / Magical Realism",
-            "Современная проза": "Fiction / Literary",
-            "Тёмное фэнтези": "Fiction / Fantasy / Dark Fantasy",
-            "Young adult": "Young Adult Fiction",
-            "Детектив": "Fiction / Mystery & Detective",
-        }
+        # Книги пользователя с высокими оценками
+        user_high_rated = db.query(Сессия_статус.id_произведения).filter(
+            and_(Сессия_статус.id_пользователя == user_id, Сессия_статус.Рейтинг >= 4.0)
+        ).all()
+        user_works = {row[0] for row in user_high_rated}
 
-        subject = genre_subjects.get(genre, genre)
+        if not user_works:
+            return []
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://www.googleapis.com/books/v1/volumes",
-                    params={
-                        "q": f'subject:"{subject}"',  # 👈 Ищем по КАТЕГОРИИ
-                        "orderBy": "newest",
-                        "maxResults": count * 2,
-                        "printType": "books"
-                    }
-                )
+        # Похожие пользователи
+        similar_users = db.query(Сессия_статус.id_пользователя).filter(
+            and_(Сессия_статус.id_произведения.in_(user_works),
+                 Сессия_статус.id_пользователя != user_id,
+                 Сессия_статус.Рейтинг >= 4.0)
+        ).distinct().all()
+        similar_user_ids = [row[0] for row in similar_users]
 
-                if response.status_code == 200:
-                    data = response.json()
-                    books = []
+        if not similar_user_ids:
+            return []
 
-                    for item in data.get("items", []):
-                        if len(books) >= count:
-                            break
+        # Все книги пользователя (исключаем)
+        all_user_books = db.query(Сессия_статус.id_произведения).filter(
+            Сессия_статус.id_пользователя == user_id
+        ).all()
+        user_book_ids = {row[0] for row in all_user_books}
 
-                        info = item.get("volumeInfo", {})
-                        title = info.get("title", "")
+        # Рекомендованные книги
+        recommended_works = db.query(
+            Сессия_статус.id_произведения,
+            func.count(Сессия_статус.id_пользователя).label('user_count'),
+            func.avg(Сессия_статус.Рейтинг).label('avg_rating')
+        ).filter(
+            and_(Сессия_статус.id_пользователя.in_(similar_user_ids),
+                 Сессия_статус.id_произведения.notin_(user_book_ids),
+                 Сессия_статус.Рейтинг >= 4.0)
+        ).group_by(Сессия_статус.id_произведения).order_by(
+            func.count(Сессия_статус.id_пользователя).desc()
+        ).limit(count * 2).all()
 
-                        if not title:
-                            continue
+        books = []
+        for work_row in recommended_works:
+            work_id, user_count, avg_rating = work_row[0], work_row[1], float(work_row[2])
 
-                        authors = info.get("authors", ["Unknown"])
-                        author_str = ", ".join(authors)
+            work = db.query(Произведения).filter(Произведения.id_произведения == work_id).first()
+            if not work:
+                continue
 
-                        image_links = info.get("imageLinks", {})
-                        cover = (image_links.get("thumbnail") or
-                                 image_links.get("smallThumbnail") or "")
-                        if cover:
-                            cover = fix_cover_url(cover)
+            content = db.query(Содержание).filter(Содержание.id_произведения == work_id).first()
+            if not content:
+                continue
 
-                        desc = info.get("description", "") or ""
-                        if len(desc) > 300:
-                            desc = desc[:300] + "..."
+            book = db.query(Книги).filter(Книги.id_книги == content.id_книги).first()
+            if not book:
+                continue
 
-                        # Настоящие категории книги
-                        categories = info.get("categories", [])
-                        real_genre = ", ".join(categories[:2]) if categories else genre
+            authors = db.query(Авторы).join(Труд).filter(Труд.id_произведения == work_id).all()
+            author_str = ", ".join([f"{a.Имя} {a.Фамилия or ''}".strip() for a in authors]) or book.Автор
 
-                        books.append({
-                            "title": title,
-                            "author": author_str,
-                            "summary": desc,
-                            "genre": real_genre,  # 👈 Реальный жанр из Google Books
-                            "cover_url": cover,
-                            "published_date": info.get("publishedDate", ""),
-                            "publisher": info.get("publisher", ""),
-                            "reason": f"Новинка: {real_genre}",
-                            "source": "google_books_new",
-                            "verified": True
-                        })
+            books.append({
+                "title": book.Название,
+                "author": author_str,
+                "summary": work.Описание or book.Описание or "",
+                "genre": book.Жанр or "",
+                "cover_url": book.Фото_обложки or "",
+                "reason": f"Нравится {user_count} читателям с похожими вкусами (★{avg_rating:.1f})",
+                "book_id": book.id_книги,
+                "source": "collaborative",
+                "verified": True
+            })
 
-                    if books:
-                        print(f"      📚 Google Books: {len(books)} книг в категории '{subject}'")
-                    else:
-                        # Если по subject не нашли — ищем по ключевым словам
-                        print(f"      ⚠️ По subject не найдено, ищем по keywords...")
-                        return await self._search_google_books_by_keywords(genre, count)
+            if len(books) >= count:
+                break
 
-                    return books
+        print(f"   👥 Коллаборативные: {len(books)} книг")
+        return books[:count]
 
-        except Exception as e:
-            print(f"      ⚠️ Google Books: {str(e)[:50]}")
+    async def _get_also_read_books(
+        self, db: Session, user_id: str, count: int = 5
+    ) -> List[Dict]:
+        """Книги которые часто читают вместе с любимыми"""
+        from models.sql_models import Сессия_статус, Произведения, Книги, Содержание, Авторы, Труд
 
-        return []
+        user_favorites = db.query(Сессия_статус.id_произведения).filter(
+            and_(Сессия_статус.id_пользователя == user_id, Сессия_статус.Рейтинг >= 4.0)
+        ).all()
+        favorite_works = [row[0] for row in user_favorites]
 
+        if not favorite_works:
+            return []
 
+        all_user_books = db.query(Сессия_статус.id_произведения).filter(
+            Сессия_статус.id_пользователя == user_id
+        ).all()
+        user_book_ids = {row[0] for row in all_user_books}
 
+        similar_readers = db.query(Сессия_статус.id_пользователя).filter(
+            and_(Сессия_статус.id_произведения.in_(favorite_works),
+                 Сессия_статус.id_пользователя != user_id)
+        ).distinct().limit(50).all()
+        reader_ids = [row[0] for row in similar_readers]
 
+        if not reader_ids:
+            return []
 
+        also_read = db.query(
+            Сессия_статус.id_произведения,
+            func.count(Сессия_статус.id_пользователя).label('reader_count')
+        ).filter(
+            and_(Сессия_статус.id_пользователя.in_(reader_ids),
+                 Сессия_статус.id_произведения.notin_(user_book_ids),
+                 Сессия_статус.id_произведения.notin_(favorite_works))
+        ).group_by(Сессия_статус.id_произведения).order_by(
+            func.count(Сессия_статус.id_пользователя).desc()
+        ).limit(count * 2).all()
+
+        books = []
+        for work_row in also_read:
+            work_id, reader_count = work_row[0], work_row[1]
+
+            work = db.query(Произведения).filter(Произведения.id_произведения == work_id).first()
+            if not work:
+                continue
+
+            content = db.query(Содержание).filter(Содержание.id_произведения == work_id).first()
+            if not content:
+                continue
+
+            book = db.query(Книги).filter(Книги.id_книги == content.id_книги).first()
+            if not book:
+                continue
+
+            authors = db.query(Авторы).join(Труд).filter(Труд.id_произведения == work_id).all()
+            author_str = ", ".join([f"{a.Имя} {a.Фамилия or ''}".strip() for a in authors]) or book.Автор
+
+            books.append({
+                "title": book.Название,
+                "author": author_str,
+                "summary": work.Описание or book.Описание or "",
+                "genre": book.Жанр or "",
+                "cover_url": book.Фото_обложки or "",
+                "reason": f"Часто читают вместе с вашими любимыми книгами ({reader_count} читателей)",
+                "book_id": book.id_книги,
+                "source": "also_read",
+                "verified": True
+            })
+
+            if len(books) >= count:
+                break
+
+        print(f"   📚 Читают вместе: {len(books)} книг")
+        return books[:count]
 
     # ================================================================
     # СБОР ДАННЫХ ДЛЯ ПРОМПТА
@@ -284,7 +346,6 @@ class BookRecommendationService:
         """Собирает данные для промпта"""
         user_likes = []
         favorite_authors = set()
-        favorite_genres = set()
 
         for book in highly_rated_books:
             user_likes.append({
@@ -293,8 +354,6 @@ class BookRecommendationService:
                 "source": "высокая оценка"
             })
             favorite_authors.add(book['author'])
-            if book.get('genre'):
-                favorite_genres.add(book['genre'])
 
         for book in liked_books:
             if not any(b['title'] == book['title'] and b['author'] == book['author'] for b in user_likes):
@@ -304,8 +363,6 @@ class BookRecommendationService:
                     "source": "понравилось"
                 })
                 favorite_authors.add(book['author'])
-                if book.get('genre'):
-                    favorite_genres.add(book['genre'])
 
         user_dislikes = []
         for book in disliked_books:
@@ -321,8 +378,7 @@ class BookRecommendationService:
         likes_parts = []
         for book in user_likes:
             if book['source'] == "высокая оценка":
-                likes_parts.append(
-                    f"❤️ {book['title']} — {book['author']} (жанр: {book['genre']}, оценка: {book['rating']}/5)")
+                likes_parts.append(f"❤️ {book['title']} — {book['author']} (жанр: {book['genre']}, оценка: {book['rating']}/5)")
             else:
                 likes_parts.append(f"👍 {book['title']} — {book['author']} (жанр: {book['genre']}, понравилось)")
 
@@ -335,40 +391,25 @@ class BookRecommendationService:
         authors_list = sorted(favorite_authors)[:10]
         authors_text = "\n".join([f"⭐ {a}" for a in authors_list]) if authors_list else "Нет данных"
 
-        genres_list = sorted(favorite_genres)[:5]
-        genres_text = ", ".join(genres_list) if genres_list else "не определены"
-
         return {
             "liked_text": "\n".join(likes_parts) if likes_parts else "Нет данных",
             "disliked_text": "\n".join(dislikes_parts) if dislikes_parts else "Нет",
             "library_text": "\n".join([f"📚 {b}" for b in library_list]) if library_list else "Нет",
             "favorite_authors": authors_text,
-            "favorite_genres": genres_text,
-            "favorite_genres_list": genres_list,
             "user_dislikes": user_dislikes[:10],
             "books_in_library": books_in_library
         }
 
-
-
-
-
     # ================================================================
-    # ГЕНЕРАЦИЯ РЕКОМЕНДАЦИЙ ЧЕРЕЗ DEEPSEEK
+    # ГЕНЕРАЦИЯ РЕКОМЕНДАЦИЙ
     # ================================================================
-
-
-
 
     async def _generate_recommendations_batch(
             self, db: Session, user_id: str,
             liked_books: List[Dict], disliked_books: List[Dict],
             highly_rated_books: List[Dict], count: int = 5, batch_number: int = 1
     ) -> Dict[str, Any]:
-        """Генерирует партию рекомендаций:
-        - Нечётные партии (1,3,5...) → новинки из Google Books API
-        - Чётные партии (2,4,6...) → рекомендации DeepSeek
-        """
+        """Трёхуровневая система: коллаборативная → читают вместе → DeepSeek"""
 
         if not self.api_key:
             print("❌ Нет API ключа DeepSeek")
@@ -376,30 +417,42 @@ class BookRecommendationService:
 
         data = self._build_prompt_data(liked_books, disliked_books, highly_rated_books)
 
-        # Определяем тип партии
-        is_odd_batch = batch_number % 2 != 0  # 1, 3, 5, 7, 9 — нечётные → новинки Google Books
+        print(f"\n{'='*60}")
+        print(f"🎯 ПАРТИЯ {batch_number} | {user_id}")
+        print(f"{'='*60}\n")
 
-        print(f"\n{'=' * 60}")
-        if is_odd_batch:
-            print(f"🎯 GOOGLE BOOKS API (партия {batch_number}) | Новинки по жанрам")
-        else:
-            print(f"🎯 DEEPSEEK API (партия {batch_number}) | {user_id}")
-        print(
-            f"❤️{len(highly_rated_books)} 👍{len(liked_books)} 👎{len(data['user_dislikes'])} 📚{len(data['books_in_library'])}")
-        print(f"🎯 Жанры: {data['favorite_genres']}")
-        print(f"{'=' * 60}\n")
+        all_books = []
 
-        if is_odd_batch:
-            # Нечётные партии — новинки из Google Books
-            return await self._generate_google_books_batch(data, count, batch_number)
-        else:
-            # Чётные партии — DeepSeek
-            return await self._generate_via_deepseek(data, count, batch_number)
+        # Шаг 1: Коллаборативная фильтрация
+        print("👥 Шаг 1: Похожие пользователи...")
+        collab_books = await self._get_collaborative_recommendations(db, user_id, count)
+        all_books.extend(collab_books)
 
+        # Шаг 2: Читают вместе
+        if len(all_books) < count:
+            print("📚 Шаг 2: Читают вместе...")
+            also_read = await self._get_also_read_books(db, user_id, count - len(all_books))
+            for book in also_read:
+                if not any(b['title'] == book['title'] for b in all_books):
+                    all_books.append(book)
 
+        # Шаг 3: DeepSeek
+        if len(all_books) < count:
+            print(f"🤖 Шаг 3: DeepSeek ({count - len(all_books)} книг)...")
+            deepseek_result = await self._generate_via_deepseek(data, count - len(all_books), batch_number)
+            for book in deepseek_result.get("books", []):
+                if len(all_books) >= count:
+                    break
+                if not any(b['title'] == book['title'] for b in all_books):
+                    book["source"] = "deepseek"
+                    all_books.append(book)
 
+        print(f"   🎯 Итого: {len(all_books)} книг\n")
 
-
+        return {
+            "comment": f"Подобрала для вас {len(all_books)} книг на основе вкусов похожих читателей и AI-анализа!",
+            "books": all_books[:count]
+        }
 
     async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int) -> Dict[str, Any]:
         """Генерация через DeepSeek"""
@@ -408,17 +461,13 @@ class BookRecommendationService:
 
 ВСЕ ОТВЕТЫ ДОЛЖНЫ БЫТЬ НА РУССКОМ ЯЗЫКЕ!
 
-🎯 ПРИОРИТЕТ РЕКОМЕНДАЦИЙ:
-1. СНАЧАЛА рекомендуй другие книги АВТОРОВ из списка ⭐
-2. Затем — книги того же ЖАНРА ({data['favorite_genres']})
-3. Затем — популярные новинки в любимых жанрах
+🎯 ТВОЯ ЗАДАЧА:
+Рекомендовать популярные книги, которые ЧАСТО ЧИТАЮТ ВМЕСТЕ с любимыми книгами пользователя.
 
-СТРОГИЕ ПРАВИЛА:
-- Рекомендуй ТОЛЬКО реально существующие книги
-- Если сомневаешься — НЕ рекомендую
-- НИКОГДА не придумывай книги
-
-Это партия №{batch_number}.
+📊 ТЫ ДОЛЖЕН ЗНАТЬ:
+- Какие книги обычно читают вместе (BookTok тренды, рекомендации букблогеров)
+- Какие книги входят в одни подборки и рекомендательные списки
+- Какие книги рекомендуют друг другу читатели в отзывах
 
 ⭐ ЛЮБИМЫЕ АВТОРЫ:
 {data['favorite_authors']}
@@ -465,17 +514,11 @@ class BookRecommendationService:
 
     def _get_fallback_recommendations(self, count: int = 5) -> Dict[str, Any]:
         all_books = [
-            {"title": "Три тела", "author": "Лю Цысинь", "summary": "Первый контакт с инопланетной цивилизацией.",
-             "genre": "Научная фантастика", "reason": "Масштабное миростроение."},
-            {"title": "Песнь льда и пламени", "author": "Джордж Мартин", "summary": "Борьба за власть в фэнтези мире.",
-             "genre": "Фэнтези", "reason": "Политические интриги."},
-            {"title": "Семь мужей Эвелин Хьюго", "author": "Тейлор Дженкинс Рейд",
-             "summary": "История голливудской иконы.", "genre": "Романтическая проза",
-             "reason": "Эмоциональная история."},
-            {"title": "Проект «Аве Мария»", "author": "Энди Вейер", "summary": "Астронавт спасает человечество.",
-             "genre": "Научная фантастика", "reason": "Умная фантастика."},
-            {"title": "Тайная история", "author": "Донна Тартт", "summary": "Студенты и убийство.",
-             "genre": "Психологический триллер", "reason": "Напряжённый сюжет."}
+            {"title": "Три тела", "author": "Лю Цысинь", "summary": "Первый контакт с инопланетной цивилизацией.", "genre": "Научная фантастика", "reason": "Масштабное миростроение."},
+            {"title": "Песнь льда и пламени", "author": "Джордж Мартин", "summary": "Борьба за власть в фэнтези мире.", "genre": "Фэнтези", "reason": "Политические интриги."},
+            {"title": "Семь мужей Эвелин Хьюго", "author": "Тейлор Дженкинс Рейд", "summary": "История голливудской иконы.", "genre": "Романтическая проза", "reason": "Эмоциональная история."},
+            {"title": "Проект «Аве Мария»", "author": "Энди Вейер", "summary": "Астронавт спасает человечество.", "genre": "Научная фантастика", "reason": "Умная фантастика."},
+            {"title": "Тайная история", "author": "Донна Тартт", "summary": "Студенты и убийство.", "genre": "Психологический триллер", "reason": "Напряжённый сюжет."}
         ]
         return {"comment": "На основе ваших предпочтений.", "books": all_books[:count]}
 
@@ -484,15 +527,28 @@ class BookRecommendationService:
     # ================================================================
 
     async def _filter_viewed_books(self, db: Session, user_id: str, books: List[Dict]) -> List[Dict]:
-        from models.sql_models import Рекомендации_реакции
+        from models.sql_models import Рекомендации_реакции, Кеш_рекомендаций
+
         reactions = db.query(Рекомендации_реакции).filter(
             Рекомендации_реакции.id_пользователя == user_id
         ).all()
         reacted_titles = {f"{r.title.lower()} — {r.author.lower()}" for r in reactions}
+
+        shown = db.query(Кеш_рекомендаций).filter(
+            Кеш_рекомендаций.id_пользователя == user_id,
+            Кеш_рекомендаций.is_used == True
+        ).all()
+        shown_titles = set()
+        for cached in shown:
+            for b in (cached.books_json if isinstance(cached.books_json, list) else []):
+                shown_titles.add(f"{b.get('title', '').lower()} — {b.get('author', '').lower()}")
+
+        all_viewed = reacted_titles | shown_titles
+
         filtered = []
         for book in books:
             key = f"{book.get('title', '').lower()} — {book.get('author', '').lower()}"
-            if key not in reacted_titles:
+            if key not in all_viewed:
                 filtered.append(book)
         return filtered
 
@@ -530,14 +586,12 @@ class BookRecommendationService:
             for cached in cached_batches:
                 books = cached.books_json if isinstance(cached.books_json, list) else []
                 original = len(books)
-                filtered = [b for b in books if
-                            f"{b.get('title', '').lower()} — {b.get('author', '').lower()}" not in reacted_titles]
+                filtered = [b for b in books if f"{b.get('title', '').lower()} — {b.get('author', '').lower()}" not in reacted_titles]
                 if len(filtered) < original:
                     cached.books_json = filtered
                     cleaned += (original - len(filtered))
             if cleaned:
                 db.commit()
-                print(f"🧹 Очищено {cleaned} книг из кеша")
         except Exception as e:
             print(f"⚠️ Очистка кеша: {e}")
             db.rollback()
@@ -578,25 +632,21 @@ class BookRecommendationService:
                 else:
                     cached.is_used = True
                     db.commit()
-                    recommendations = await self._generate_recommendations_batch(db, user_id, liked_books,
-                                                                                 disliked_books, highly_rated_books,
-                                                                                 count, batch)
+                    recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch)
                     all_books = filtered_books + recommendations.get("books", [])
                     seen = set()
-                    unique_books = []
+                    unique = []
                     for book in all_books:
                         key = f"{book.get('title', '')} — {book.get('author', '')}"
                         if key not in seen:
                             seen.add(key)
-                            unique_books.append(book)
-                    result = {"comment": recommendations.get("comment", ""), "books": unique_books[:count]}
+                            unique.append(book)
+                    result = {"comment": recommendations.get("comment", ""), "books": unique[:count]}
                     self._save_to_cache(db, user_id, result, batch)
             else:
-                recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books,
-                                                                             highly_rated_books, count, batch)
+                recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch)
                 filtered_books = await self._filter_viewed_books(db, user_id, recommendations.get("books", []))
-                result = {"comment": recommendations.get("comment", ""),
-                          "books": filtered_books if len(filtered_books) >= 3 else recommendations.get("books", [])}
+                result = {"comment": recommendations.get("comment", ""), "books": filtered_books if len(filtered_books) >= 3 else recommendations.get("books", [])}
                 self._save_to_cache(db, user_id, result, batch)
 
             next_batch = batch + 1
@@ -606,27 +656,20 @@ class BookRecommendationService:
                          Кеш_рекомендаций.expires_at > datetime.now())
                 ).first()
                 if not next_cached:
-                    asyncio.create_task(
-                        self._preload_with_delay(db, user_id, liked_books, disliked_books, highly_rated_books, count,
-                                                 next_batch))
+                    asyncio.create_task(self._preload_with_delay(db, user_id, liked_books, disliked_books, highly_rated_books, count, next_batch))
 
             enriched = await self.search_books_in_db(db, result)
             await self._clean_viewed_from_cache(db, user_id)
-            return {"recommendations": enriched, "has_more": batch < 10,
-                    "next_batch": next_batch if batch < 10 else None}
+            return {"recommendations": enriched, "has_more": batch < 10, "next_batch": next_batch if batch < 10 else None}
 
-    async def _preload_with_delay(self, db, user_id, liked_books, disliked_books, highly_rated_books, count,
-                                  batch_number, delay=15):
+    async def _preload_with_delay(self, db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number, delay=15):
         await asyncio.sleep(delay)
-        await self._preload_next_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count,
-                                       batch_number)
+        await self._preload_next_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number)
 
-    async def _preload_next_batch(self, db, user_id, liked_books, disliked_books, highly_rated_books, count,
-                                  batch_number):
+    async def _preload_next_batch(self, db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number):
         from models.sql_models import Кеш_рекомендаций
         try:
-            recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books,
-                                                                         highly_rated_books, count, batch_number)
+            recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number)
             filtered_books = await self._filter_viewed_books(db, user_id, recommendations.get("books", []))
             cache_entry = Кеш_рекомендаций(
                 id_пользователя=user_id,
@@ -641,12 +684,6 @@ class BookRecommendationService:
             print(f"❌ [ФОН] Ошибка: {e}")
             db.rollback()
 
-
-
-
-
-
-
     async def search_books_in_db(self, db: Session, recommendations: Dict) -> Dict:
         from models.sql_models import Книги
         enriched = []
@@ -654,17 +691,10 @@ class BookRecommendationService:
             title = book.get("title", "")
             author = book.get("author", "")
             db_book = db.query(Книги).filter(Книги.Название.ilike(f"%{title}%")).first()
-
-            cover_url = None
-            if db_book and db_book.Фото_обложки:
-                cover_url = db_book.Фото_обложки
-            else:
-                cover_url = await self._search_book_cover(title, author, i)
-
+            cover_url = db_book.Фото_обложки if db_book and db_book.Фото_обложки else await self._search_book_cover(title, author, i)
             if db_book and cover_url and not db_book.Фото_обложки:
                 db_book.Фото_обложки = cover_url
                 db.commit()
-
             enriched.append({
                 "title": title, "author": author,
                 "summary": book.get("summary", ""), "genre": book.get("genre", ""),
@@ -673,274 +703,6 @@ class BookRecommendationService:
                 "cover_url": cover_url or "", "in_library": db_book is not None
             })
         return {"comment": recommendations.get("comment", ""), "books": enriched}
-
-
-
-
-
-
-
-    async def _search_author_books_on_chitai_gorod(self, author: str, count: int = 3) -> List[Dict]:
-        """
-        Ищет книги автора на Читай-городе.
-        Книги из магазина считаем проверенными — они точно существуют!
-        """
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.get(
-                    "https://www.chitai-gorod.ru/search",
-                    params={"phrase": author},
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Accept": "text/html,application/xhtml+xml"
-                    }
-                )
-
-                if response.status_code == 200:
-                    html = response.text
-
-                    # Ищем JSON с данными товаров (обычно в Next.js данных)
-                    json_pattern = r'"(title|author|image|url)":"([^"]+)"'
-                    matches = re.findall(json_pattern, html)
-
-                    books = []
-                    seen_titles = set()
-
-                    # Парсим найденные книги
-                    i = 0
-                    while i < len(matches) - 2:
-                        title = ""
-                        book_author = ""
-                        image = ""
-
-                        if matches[i][0] == "title":
-                            title = matches[i][1]
-                        if i + 1 < len(matches) and matches[i + 1][0] == "author":
-                            book_author = matches[i + 1][1]
-                        if i + 2 < len(matches) and matches[i + 2][0] == "image":
-                            image = matches[i + 2][1]
-
-                        if title and title not in seen_titles and len(books) < count:
-                            seen_titles.add(title)
-                            books.append({
-                                "title": title.replace("\\u0026", "&").replace("\\/", "/"),
-                                "author": author,
-                                "cover_url": image.replace("\\/", "/") if image else "",
-                                "genre": "",
-                                "summary": "",
-                                "reason": f"Книга любимого автора {author} (Читай-город)",
-                                "source": "chitai_gorod",
-                                "verified": True  # ✅ Книги из магазина точно существуют!
-                            })
-                        i += 1
-
-                    if books:
-                        print(f"      📚 Читай-город: найдено {len(books)} книг автора '{author}'")
-
-                    return books
-
-        except Exception as e:
-            print(f"      ⚠️ Читай-город: {str(e)[:50]}")
-
-        return []
-
-
-    async def _search_author_books(self, author: str, count: int = 3) -> List[Dict]:
-        """
-        Ищет книги автора через Google Books API.
-        Гарантированно находит реальные книги!
-        """
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    "https://www.googleapis.com/books/v1/volumes",
-                    params={
-                        "q": f'inauthor:"{author}"',
-                        "maxResults": count + 3,  # Запрашиваем больше на случай фильтрации
-                        "langRestrict": "ru",
-                        "orderBy": "newest",
-                        "printType": "books"
-                    }
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    books = []
-                    seen_titles = set()
-
-                    for item in data.get("items", []):
-                        if len(books) >= count:
-                            break
-
-                        info = item.get("volumeInfo", {})
-                        title = info.get("title", "")
-
-                        # Пропускаем дубликаты
-                        if title.lower() in seen_titles:
-                            continue
-                        seen_titles.add(title.lower())
-
-                        # Получаем авторов
-                        authors_list = info.get("authors", [author])
-                        author_str = ", ".join(authors_list)
-
-                        # Обложка
-                        image_links = info.get("imageLinks", {})
-                        cover = (image_links.get("thumbnail") or
-                                 image_links.get("smallThumbnail") or "")
-                        if cover:
-                            cover = fix_cover_url(cover)
-
-                        # Жанры
-                        genres = info.get("categories", [])
-                        genre_str = ", ".join(genres[:3]) if genres else ""
-
-                        # Описание
-                        description = info.get("description", "") or ""
-                        if len(description) > 300:
-                            description = description[:300] + "..."
-
-                        books.append({
-                            "title": title,
-                            "author": author_str,
-                            "cover_url": cover,
-                            "genre": genre_str,
-                            "summary": description,
-                            "published_date": info.get("publishedDate", ""),
-                            "publisher": info.get("publisher", ""),
-                            "isbn": info.get("industryIdentifiers", [{}])[0].get("identifier", ""),
-                            "reason": f"Книга любимого автора {author}",
-                            "source": "google_books_author",
-                            "verified": True  # ✅ Из Google Books — точно существует!
-                        })
-
-                    if books:
-                        print(f"      📚 Найдено {len(books)} книг автора '{author}'")
-
-                    return books
-
-        except Exception as e:
-            print(f"      ⚠️ Поиск автора {author}: {str(e)[:50]}")
-
-        return []
-
-    async def _generate_google_books_batch(self, data: Dict, count: int, batch_number: int) -> Dict[str, Any]:
-        """Генерирует партию новинок из Google Books с переводом на русский"""
-
-        all_books = []
-        genres = data.get("favorite_genres_list", [])
-
-        if not genres:
-            genres = ["fiction", "fantasy", "romance"]
-
-        print(f"   📚 Ищу новинки в Google Books по жанрам: {', '.join(genres[:5])}")
-
-        for genre in genres[:5]:
-            if len(all_books) >= count:
-                break
-
-            new_books = await self._search_google_books_by_genre(genre, 3)
-
-            for nb in new_books:
-                if len(all_books) >= count:
-                    break
-                book_key = f"{nb['title']} — {nb['author']}"
-                if book_key not in data.get('books_in_library', set()):
-                    if not any(b['title'] == nb['title'] for b in all_books):
-                        all_books.append(nb)
-
-        # 👇 ПЕРЕВОДИМ НА РУССКИЙ
-        if all_books:
-            print(f"   🌐 Перевожу {len(all_books)} книг на русский...")
-            all_books = await self._translate_books_to_russian(all_books)
-
-        # Добираем если не хватает
-        if len(all_books) < count:
-            popular = await self._search_google_books_by_genre("bestseller", count - len(all_books))
-            if popular:
-                popular = await self._translate_books_to_russian(popular)
-            for nb in popular:
-                if len(all_books) >= count:
-                    break
-                if not any(b['title'] == nb['title'] for b in all_books):
-                    all_books.append(nb)
-
-        print(f"   ✅ Google Books: {len(all_books)} новинок (переведены)\n")
-
-        return {
-            "comment": f"Новинки в ваших любимых жанрах: {', '.join(genres[:3])}. Уже переведены на русский!",
-            "books": all_books[:count]
-        }
-
-
-    async def _translate_books_to_russian(self, books: List[Dict]) -> List[Dict]:
-        """Переводит названия и описания книг на русский через DeepSeek"""
-
-        if not books:
-            return books
-
-        # Формируем список для перевода
-        books_list = []
-        for i, book in enumerate(books):
-            books_list.append(
-                f"{i + 1}. Title: {book.get('title', '')}\n"
-                f"   Author: {book.get('author', '')}\n"
-                f"   Description: {book.get('summary', '')[:200]}"
-            )
-
-        books_text = "\n\n".join(books_list)
-
-        prompt = f"""Translate these book titles, author names, and descriptions into Russian.
-    Make translations natural and appealing for Russian readers.
-    
-    {books_text}
-    
-    Return ONLY a JSON object with a "books" array:
-    {{"books": [{{"title_ru": "...", "author_ru": "...", "summary_ru": "..."}}]}}"""
-
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    self.api_url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {self.api_key}"
-                    },
-                    json={
-                        "model": "deepseek-chat",
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.3,
-                        "max_tokens": 2000,
-                        "response_format": {"type": "json_object"}
-                    }
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    content = data['choices'][0]['message']['content']
-                    result = json.loads(content)
-
-                    translations = result.get("books", [])
-
-                    for i, book in enumerate(books):
-                        if i < len(translations):
-                            tr = translations[i]
-                            if tr.get("title_ru"):
-                                book["title"] = tr["title_ru"]
-                            if tr.get("author_ru"):
-                                book["author"] = tr["author_ru"]
-                            if tr.get("summary_ru"):
-                                book["summary"] = tr["summary_ru"]
-
-                    print(f"      🌐 Переведено {len(books)} книг на русский")
-
-        except Exception as e:
-            print(f"      ⚠️ Ошибка перевода: {str(e)[:50]}")
-
-        return books
-
-
-
 
 
 recommendation_service = BookRecommendationService()
