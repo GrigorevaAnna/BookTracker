@@ -351,85 +351,38 @@ class BookRecommendationService:
         print(f"{'=' * 60}\n")
 
         all_books = []
-        shown_titles = set()
 
         # Шаг 1: Коллаборативная фильтрация
         print("👥 Шаг 1: Похожие пользователи...")
         collab_books = await self._get_collaborative_recommendations(db, user_id, count)
+        all_books.extend(collab_books)
+        print(f"   👥 Найдено: {len(collab_books)} книг")
 
-        collab_added = 0
-        for book in collab_books:
-            key = f"{book['title'].lower()} — {book['author'].lower()}"
-            if key not in shown_titles:
-                shown_titles.add(key)
-                all_books.append(book)
-                collab_added += 1
-
-        print(f"   👥 Добавлено: {collab_added} (из {len(collab_books)} найденных)")
-
-        # 👇 ВАЖНО: Если коллаборативные закончились — сразу включаем DeepSeek
+        # Шаг 2: DeepSeek (если коллаборативных не хватило)
         if len(all_books) < count:
             needed = count - len(all_books)
             print(f"🤖 Шаг 2: DeepSeek ({needed} книг)...")
-            deepseek_result = await self._generate_via_deepseek(data, needed, batch_number, shown_titles)
+            deepseek_result = await self._generate_via_deepseek(data, needed, batch_number)
 
-            deepseek_added = 0
             for book in deepseek_result.get("books", []):
                 if len(all_books) >= count:
                     break
-                key = f"{book.get('title', '').lower()} — {book.get('author', '').lower()}"
-                if key not in shown_titles:
-                    shown_titles.add(key)
+                # Проверяем что такой книги ещё нет в all_books
+                if not any(b['title'] == book.get('title') for b in all_books):
                     book["source"] = "deepseek"
                     all_books.append(book)
-                    deepseek_added += 1
 
-            print(f"   🤖 Добавлено: {deepseek_added}")
-
-        # 👇 Если всё ещё не хватает — пробуем Google Books
-        if len(all_books) < count:
-            needed = count - len(all_books)
-            print(f"📚 Шаг 3: Google Books ({needed} книг)...")
-            genres = []
-            for book in highly_rated_books:
-                if book.get('genre'):
-                    genres.append(book['genre'])
-
-            for genre in genres[:3]:
-                if len(all_books) >= count:
-                    break
-                gb_books = await self._search_google_books_by_genre(genre, needed)
-                for gb in gb_books:
-                    if len(all_books) >= count:
-                        break
-                    key = f"{gb['title'].lower()} — {gb['author'].lower()}"
-                    if key not in shown_titles:
-                        shown_titles.add(key)
-                        gb["source"] = "google_books"
-                        all_books.append(gb)
+            print(f"   🤖 Добавлено от DeepSeek: {len(all_books) - len(collab_books)} книг")
 
         print(f"   🎯 Итого: {len(all_books)} книг\n")
 
         return {
-            "comment": f"Подобрала для вас {len(all_books)} книг!",
+            "comment": f"Подобрала для вас {len(all_books)} книг! Сначала — что нравится похожим читателям, затем — AI-рекомендации.",
             "books": all_books[:count]
         }
 
-
-
-
-
-
-
-    async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int, shown_titles: set = None) -> Dict[
-        str, Any]:
-        """Генерация через DeepSeek с учётом уже показанных книг"""
-
-        # Формируем список уже показанных книг
-        shown_text = ""
-        if shown_titles:
-            shown_list = list(shown_titles)[:20]
-            shown_text = "\n".join([f"⛔ {t}" for t in shown_list])
+    async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int) -> Dict[str, Any]:
+        """Генерация через DeepSeek"""
 
         system_prompt = f"""Ты — лучший книжный ассистент в мире. 
 
@@ -449,7 +402,6 @@ class BookRecommendationService:
 
     СТРОГИЕ ПРАВИЛА:
     - НЕ рекомендуй книги которые пользователь УЖЕ ЧИТАЛ (📚)
-    - НЕ рекомендуй книги которые УЖЕ ПОКАЗАНЫ (⛔)
     - НЕ рекомендуй книги которые НЕ ПОНРАВИЛИСЬ (👎)
     - ТОЛЬКО реальные книги!
 
@@ -464,9 +416,6 @@ class BookRecommendationService:
 
     📚 В БИБЛИОТЕКЕ (не показывай):
     {data['library_text']}
-
-    ⛔ УЖЕ ПОКАЗАНЫ (не повторяй):
-    {shown_text if shown_text else "Нет"}
 
     Верни СТРОГО JSON:
     {{"comment": "комментарий", "books": [{{"title": "Название", "author": "Автор", "summary": "Описание", "genre": "Жанр", "reason": "Почему читают вместе с ..."}}]}}"""
@@ -632,27 +581,30 @@ class BookRecommendationService:
                     result = {"comment": recommendations.get("comment", ""), "books": unique[:count]}
                     self._save_to_cache(db, user_id, result, batch)
             else:
-                recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch)
+                recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books,
+                                                                             highly_rated_books, count, batch)
                 filtered_books = await self._filter_viewed_books(db, user_id, recommendations.get("books", []))
-                result = {"comment": recommendations.get("comment", ""), "books": filtered_books if len(filtered_books) >= 3 else recommendations.get("books", [])}
-                self._save_to_cache(db, user_id, result, batch)
 
-            next_batch = batch + 1
-            if next_batch <= 10:
-                next_cached = db.query(Кеш_рекомендаций).filter(
-                    and_(Кеш_рекомендаций.id_пользователя == user_id, Кеш_рекомендаций.batch_number == next_batch,
-                         Кеш_рекомендаций.expires_at > datetime.now())
-                ).first()
-                if not next_cached:
-                    asyncio.create_task(self._preload_with_delay(db, user_id, liked_books, disliked_books, highly_rated_books, count, next_batch))
+            if not filtered_books and recommendations.get("books"):
+                filtered_books = recommendations.get("books", [])
+                print("      ⚠️ Все книги уже показаны, показываем заново")
 
-            enriched = await self.search_books_in_db(db, result)
-            await self._clean_viewed_from_cache(db, user_id)
-            return {"recommendations": enriched, "has_more": batch < 10, "next_batch": next_batch if batch < 10 else None}
+            result = {"comment": recommendations.get("comment", ""), "books": filtered_books[:count]}
+            self._save_to_cache(db, user_id, result, batch)
+
+
+
+
+
 
     async def _preload_with_delay(self, db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number, delay=15):
         await asyncio.sleep(delay)
         await self._preload_next_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number)
+
+
+
+
+
 
     async def _preload_next_batch(self, db, user_id, liked_books, disliked_books, highly_rated_books, count, batch_number):
         from models.sql_models import Кеш_рекомендаций
@@ -671,6 +623,14 @@ class BookRecommendationService:
         except Exception as e:
             print(f"❌ [ФОН] Ошибка: {e}")
             db.rollback()
+
+
+
+
+
+
+
+
 
     async def search_books_in_db(self, db: Session, recommendations: Dict) -> Dict:
         from models.sql_models import Книги
