@@ -499,6 +499,28 @@ class BookRecommendationService:
 
 
 
+
+    def _save_to_cache(self, db: Session, user_id: str, result: Dict, batch: int):
+        from models.sql_models import Кеш_рекомендаций
+        try:
+            cache_entry = Кеш_рекомендаций(
+                id_пользователя=user_id,
+                books_json=result.get("books", []),
+                comment=result.get("comment", ""),
+                batch_number=batch, is_used=True,
+                expires_at=datetime.now() + timedelta(hours=24)
+            )
+            db.add(cache_entry)
+            db.commit()
+        except Exception as e:
+            print(f"⚠️ Кеш: {e}")
+            db.rollback()
+
+
+
+
+
+
     async def _clean_viewed_from_cache(self, db: Session, user_id: str):
         from models.sql_models import Кеш_рекомендаций, Рекомендации_реакции
         try:
