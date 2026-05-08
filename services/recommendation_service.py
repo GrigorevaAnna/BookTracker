@@ -536,7 +536,6 @@ class BookRecommendationService:
     # ОСНОВНОЙ МЕТОД
     # ================================================================
 
-
     async def get_or_generate_recommendations(
             self, db: Session, user_id: str,
             liked_books: List[Dict], disliked_books: List[Dict] = None,
@@ -548,11 +547,13 @@ class BookRecommendationService:
         lock = self._get_lock(user_id)
 
         async with lock:
+            # Очищаем просроченный кеш
             db.query(Кеш_рекомендаций).filter(
                 and_(Кеш_рекомендаций.id_пользователя == user_id, Кеш_рекомендаций.expires_at < datetime.now())
             ).delete()
             db.commit()
 
+            # Проверяем кеш
             cached = db.query(Кеш_рекомендаций).filter(
                 and_(Кеш_рекомендаций.id_пользователя == user_id, Кеш_рекомендаций.batch_number == batch,
                      Кеш_рекомендаций.is_used == False, Кеш_рекомендаций.expires_at > datetime.now())
@@ -561,36 +562,68 @@ class BookRecommendationService:
             if cached:
                 cached_books = cached.books_json if isinstance(cached.books_json, list) else []
                 filtered_books = await self._filter_viewed_books(db, user_id, cached_books)
+
                 if len(filtered_books) >= 3:
+                    # Достаточно книг в кеше — отдаём
                     cached.books_json = filtered_books
                     cached.is_used = True
                     db.commit()
                     result = {"comment": cached.comment, "books": filtered_books, "from_cache": True}
                 else:
+                    # Слишком много отфильтровано — генерируем новые
                     cached.is_used = True
                     db.commit()
-                    recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books, highly_rated_books, count, batch)
-                    all_books = filtered_books + recommendations.get("books", [])
-                    seen = set()
-                    unique = []
-                    for book in all_books:
-                        key = f"{book.get('title', '')} — {book.get('author', '')}"
-                        if key not in seen:
-                            seen.add(key)
-                            unique.append(book)
-                    result = {"comment": recommendations.get("comment", ""), "books": unique[:count]}
+
+                    # 👇 Генерируем ЗАНОВО (не добавляем старые отфильтрованные!)
+                    recommendations = await self._generate_recommendations_batch(
+                        db, user_id, liked_books, disliked_books, highly_rated_books, count, batch
+                    )
+                    # Фильтруем новые
+                    new_filtered = await self._filter_viewed_books(db, user_id, recommendations.get("books", []))
+
+                    if len(new_filtered) >= 3:
+                        result = {"comment": recommendations.get("comment", ""), "books": new_filtered[:count]}
+                    else:
+                        # Если даже новые отфильтровались — используем как есть
+                        result = {"comment": recommendations.get("comment", ""),
+                                  "books": recommendations.get("books", [])[:count]}
+
                     self._save_to_cache(db, user_id, result, batch)
             else:
-                recommendations = await self._generate_recommendations_batch(db, user_id, liked_books, disliked_books,
-                                                                             highly_rated_books, count, batch)
+                # Кеша нет — генерируем
+                recommendations = await self._generate_recommendations_batch(
+                    db, user_id, liked_books, disliked_books, highly_rated_books, count, batch
+                )
                 filtered_books = await self._filter_viewed_books(db, user_id, recommendations.get("books", []))
 
-            if not filtered_books and recommendations.get("books"):
-                filtered_books = recommendations.get("books", [])
-                print("      ⚠️ Все книги уже показаны, показываем заново")
+                if len(filtered_books) >= 3:
+                    result = {"comment": recommendations.get("comment", ""), "books": filtered_books[:count]}
+                else:
+                    # Если всё отфильтровалось — генерируем ЧЕРЕЗ DEEPSEEK ещё раз
+                    print("      ⚠️ Все коллаборативные уже показаны, запрашиваю DeepSeek...")
+                    data = self._build_prompt_data(liked_books, disliked_books, highly_rated_books)
+                    deepseek_result = await self._generate_via_deepseek(data, count, batch)
+                    result = {"comment": deepseek_result.get("comment", ""),
+                              "books": deepseek_result.get("books", [])[:count]}
 
-            result = {"comment": recommendations.get("comment", ""), "books": filtered_books[:count]}
-            self._save_to_cache(db, user_id, result, batch)
+                self._save_to_cache(db, user_id, result, batch)
+
+            # Предзагрузка следующей партии
+            next_batch = batch + 1
+            if next_batch <= 10:
+                next_cached = db.query(Кеш_рекомендаций).filter(
+                    and_(Кеш_рекомендаций.id_пользователя == user_id, Кеш_рекомендаций.batch_number == next_batch,
+                         Кеш_рекомендаций.expires_at > datetime.now())
+                ).first()
+                if not next_cached:
+                    asyncio.create_task(
+                        self._preload_with_delay(db, user_id, liked_books, disliked_books, highly_rated_books, count,
+                                                 next_batch))
+
+            enriched = await self.search_books_in_db(db, result)
+            await self._clean_viewed_from_cache(db, user_id)
+            return {"recommendations": enriched, "has_more": batch < 10,
+                    "next_batch": next_batch if batch < 10 else None}
 
 
 
