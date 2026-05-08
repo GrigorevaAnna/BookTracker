@@ -3134,3 +3134,104 @@ async def clear_recommendations_cache(
         "message": f"Кеш очищен",
         "deleted_entries": deleted
     }
+
+
+# ============================================
+# СТАТИСТИКА КНИГИ
+# ============================================
+
+@router.get("/books/{book_id}/stats", tags=["Каталог книг"])
+def get_book_stats(
+        book_id: str,
+        db: Session = Depends(get_db)
+):
+    """
+    Получить статистику книги:
+    - Сколько человек добавили в библиотеку
+    - Сколько человек сейчас читают
+    - Сколько человек прочитали
+    - Сколько человек добавили в вишлист
+    - Средняя оценка
+    """
+    # Проверяем что книга существует
+    book = db.query(Книги).filter(Книги.id_книги == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Книга не найдена")
+
+    # Получаем произведение через Содержание
+    content = db.query(Содержание).filter(
+        Содержание.id_книги == book_id
+    ).first()
+
+    if not content:
+        return {
+            "book_id": book_id,
+            "title": book.Название,
+            "author": book.Автор,
+            "in_library_count": 0,
+            "reading_count": 0,
+            "finished_count": 0,
+            "want_to_read_count": 0,
+            "wishlist_count": 0,
+            "average_rating": 0.0,
+            "total_ratings": 0
+        }
+
+    work_id = content.id_произведения
+
+    # Считаем по статусам
+    status_counts = db.query(
+        Сессия_статус.Статус,
+        func.count().label('count')
+    ).filter(
+        Сессия_статус.id_произведения == work_id
+    ).group_by(Сессия_статус.Статус).all()
+
+    stats = {
+        "reading": 0,
+        "finished": 0,
+        "want_to_read": 0
+    }
+
+    for status_row in status_counts:
+        if status_row.Статус == "Читаю":
+            stats["reading"] = status_row.count
+        elif status_row.Статус == "Прочитано":
+            stats["finished"] = status_row.count
+        elif status_row.Статус == "Хочу прочитать":
+            stats["want_to_read"] = status_row.count
+
+    # Вишлист
+    wishlist_count = db.query(func.count()).filter(
+        Вишлист.id_книги == book_id
+    ).scalar() or 0
+
+    # Средняя оценка
+    avg_rating = db.query(func.avg(Сессия_статус.Рейтинг)).filter(
+        and_(
+            Сессия_статус.id_произведения == work_id,
+            Сессия_статус.Рейтинг > 0
+        )
+    ).scalar() or 0.0
+
+    total_ratings = db.query(func.count()).filter(
+        and_(
+            Сессия_статус.id_произведения == work_id,
+            Сессия_статус.Рейтинг > 0
+        )
+    ).scalar() or 0
+
+    return {
+        "book_id": book_id,
+        "title": book.Название,
+        "author": book.Автор,
+        "cover_url": book.Фото_обложки or "",
+        "in_library_count": stats["reading"] + stats["finished"] + stats["want_to_read"],
+        "reading_count": stats["reading"],
+        "finished_count": stats["finished"],
+        "want_to_read_count": stats["want_to_read"],
+        "wishlist_count": wishlist_count,
+        "average_rating": round(float(avg_rating), 1),
+        "total_ratings": total_ratings
+    }
+
