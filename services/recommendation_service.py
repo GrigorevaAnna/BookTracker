@@ -262,81 +262,6 @@ class BookRecommendationService:
         print(f"   👥 Коллаборативные: {len(books)} книг")
         return books[:count]
 
-    async def _get_also_read_books(
-        self, db: Session, user_id: str, count: int = 5
-    ) -> List[Dict]:
-        """Книги которые часто читают вместе с любимыми"""
-        from models.sql_models import Сессия_статус, Произведения, Книги, Содержание, Авторы, Труд
-
-        user_favorites = db.query(Сессия_статус.id_произведения).filter(
-            and_(Сессия_статус.id_пользователя == user_id, Сессия_статус.Рейтинг >= 4.0)
-        ).all()
-        favorite_works = [row[0] for row in user_favorites]
-
-        if not favorite_works:
-            return []
-
-        all_user_books = db.query(Сессия_статус.id_произведения).filter(
-            Сессия_статус.id_пользователя == user_id
-        ).all()
-        user_book_ids = {row[0] for row in all_user_books}
-
-        similar_readers = db.query(Сессия_статус.id_пользователя).filter(
-            and_(Сессия_статус.id_произведения.in_(favorite_works),
-                 Сессия_статус.id_пользователя != user_id)
-        ).distinct().limit(50).all()
-        reader_ids = [row[0] for row in similar_readers]
-
-        if not reader_ids:
-            return []
-
-        also_read = db.query(
-            Сессия_статус.id_произведения,
-            func.count(Сессия_статус.id_пользователя).label('reader_count')
-        ).filter(
-            and_(Сессия_статус.id_пользователя.in_(reader_ids),
-                 Сессия_статус.id_произведения.notin_(user_book_ids),
-                 Сессия_статус.id_произведения.notin_(favorite_works))
-        ).group_by(Сессия_статус.id_произведения).order_by(
-            func.count(Сессия_статус.id_пользователя).desc()
-        ).limit(count * 2).all()
-
-        books = []
-        for work_row in also_read:
-            work_id, reader_count = work_row[0], work_row[1]
-
-            work = db.query(Произведения).filter(Произведения.id_произведения == work_id).first()
-            if not work:
-                continue
-
-            content = db.query(Содержание).filter(Содержание.id_произведения == work_id).first()
-            if not content:
-                continue
-
-            book = db.query(Книги).filter(Книги.id_книги == content.id_книги).first()
-            if not book:
-                continue
-
-            authors = db.query(Авторы).join(Труд).filter(Труд.id_произведения == work_id).all()
-            author_str = ", ".join([f"{a.Имя} {a.Фамилия or ''}".strip() for a in authors]) or book.Автор
-
-            books.append({
-                "title": book.Название,
-                "author": author_str,
-                "summary": work.Описание or book.Описание or "",
-                "genre": book.Жанр or "",
-                "cover_url": book.Фото_обложки or "",
-                "reason": f"Часто читают вместе с вашими любимыми книгами ({reader_count} читателей)",
-                "book_id": book.id_книги,
-                "source": "also_read",
-                "verified": True
-            })
-
-            if len(books) >= count:
-                break
-
-        print(f"   📚 Читают вместе: {len(books)} книг")
-        return books[:count]
 
     # ================================================================
     # СБОР ДАННЫХ ДЛЯ ПРОМПТА
@@ -400,6 +325,10 @@ class BookRecommendationService:
             "books_in_library": books_in_library
         }
 
+
+
+
+
     # ================================================================
     # ГЕНЕРАЦИЯ РЕКОМЕНДАЦИЙ
     # ================================================================
@@ -409,7 +338,7 @@ class BookRecommendationService:
             liked_books: List[Dict], disliked_books: List[Dict],
             highly_rated_books: List[Dict], count: int = 5, batch_number: int = 1
     ) -> Dict[str, Any]:
-        """Трёхуровневая система: коллаборативная → читают вместе → DeepSeek"""
+        """Двухуровневая система: коллаборативная → DeepSeek"""
 
         if not self.api_key:
             print("❌ Нет API ключа DeepSeek")
@@ -417,72 +346,92 @@ class BookRecommendationService:
 
         data = self._build_prompt_data(liked_books, disliked_books, highly_rated_books)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"🎯 ПАРТИЯ {batch_number} | {user_id}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         all_books = []
+        shown_titles = set()  # 👈 Отслеживаем что уже показали
 
         # Шаг 1: Коллаборативная фильтрация
         print("👥 Шаг 1: Похожие пользователи...")
         collab_books = await self._get_collaborative_recommendations(db, user_id, count)
-        all_books.extend(collab_books)
+        for book in collab_books:
+            key = f"{book['title'].lower()} — {book['author'].lower()}"
+            if key not in shown_titles:
+                shown_titles.add(key)
+                all_books.append(book)
 
-        # Шаг 2: Читают вместе
+        # Шаг 2: DeepSeek (с указанием "читают вместе")
         if len(all_books) < count:
-            print("📚 Шаг 2: Читают вместе...")
-            also_read = await self._get_also_read_books(db, user_id, count - len(all_books))
-            for book in also_read:
-                if not any(b['title'] == book['title'] for b in all_books):
-                    all_books.append(book)
-
-        # Шаг 3: DeepSeek
-        if len(all_books) < count:
-            print(f"🤖 Шаг 3: DeepSeek ({count - len(all_books)} книг)...")
-            deepseek_result = await self._generate_via_deepseek(data, count - len(all_books), batch_number)
+            print(f"🤖 Шаг 2: DeepSeek ({count - len(all_books)} книг)...")
+            deepseek_result = await self._generate_via_deepseek(data, count - len(all_books), batch_number,
+                                                                shown_titles)
             for book in deepseek_result.get("books", []):
                 if len(all_books) >= count:
                     break
-                if not any(b['title'] == book['title'] for b in all_books):
+                key = f"{book.get('title', '').lower()} — {book.get('author', '').lower()}"
+                if key not in shown_titles:
+                    shown_titles.add(key)
                     book["source"] = "deepseek"
                     all_books.append(book)
 
         print(f"   🎯 Итого: {len(all_books)} книг\n")
 
         return {
-            "comment": f"Подобрала для вас {len(all_books)} книг на основе вкусов похожих читателей и AI-анализа!",
+            "comment": f"Подобрала для вас {len(all_books)} книг! Сначала — что нравится похожим читателям, затем — AI-рекомендации.",
             "books": all_books[:count]
         }
 
-    async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int) -> Dict[str, Any]:
-        """Генерация через DeepSeek"""
+    async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int, shown_titles: set = None) -> Dict[
+        str, Any]:
+        """Генерация через DeepSeek с учётом уже показанных книг"""
+
+        # Формируем список уже показанных книг
+        shown_text = ""
+        if shown_titles:
+            shown_list = list(shown_titles)[:20]
+            shown_text = "\n".join([f"⛔ {t}" for t in shown_list])
 
         system_prompt = f"""Ты — лучший книжный ассистент в мире. 
 
-ВСЕ ОТВЕТЫ ДОЛЖНЫ БЫТЬ НА РУССКОМ ЯЗЫКЕ!
+    ВСЕ ОТВЕТЫ ДОЛЖНЫ БЫТЬ НА РУССКОМ ЯЗЫКЕ!
 
-🎯 ТВОЯ ЗАДАЧА:
-Рекомендовать популярные книги, которые ЧАСТО ЧИТАЮТ ВМЕСТЕ с любимыми книгами пользователя.
+    🎯 ТВОЯ ЗАДАЧА:
+    Пользователь прочитал и полюбил определённые книги. Ты должен порекомендовать книги, 
+    которые ЧАСТО ЧИТАЮТ ВМЕСТЕ с его любимыми книгами.
 
-📊 ТЫ ДОЛЖЕН ЗНАТЬ:
-- Какие книги обычно читают вместе (BookTok тренды, рекомендации букблогеров)
-- Какие книги входят в одни подборки и рекомендательные списки
-- Какие книги рекомендуют друг другу читатели в отзывах
+    📊 ЛОГИКА РЕКОМЕНДАЦИЙ:
+    - Если человеку понравилось "Четвертое крыло", он почти наверняка полюбит "Из крови и пепла" и "Железное пламя"
+    - Если понравилась "Гипотеза любви", рекомендуй "Испанский любовный обман" и другие nerdy romance
+    - Если понравился "Жестокий принц", предложи "Королевство шипов и роз" 
+    - Если понравилась Дюна — предложи "Гиперион" и "Три тела"
 
-⭐ ЛЮБИМЫЕ АВТОРЫ:
-{data['favorite_authors']}
+    Ты знаешь все читательские подборки, тренды BookTok, списки "если понравилось это, то читайте то".
 
-❤️👍 ЧТО НРАВИТСЯ:
-{data['liked_text']}
+    СТРОГИЕ ПРАВИЛА:
+    - НЕ рекомендуй книги которые пользователь УЖЕ ЧИТАЛ (📚)
+    - НЕ рекомендуй книги которые УЖЕ ПОКАЗАНЫ (⛔)
+    - НЕ рекомендуй книги которые НЕ ПОНРАВИЛИСЬ (👎)
+    - ТОЛЬКО реальные книги!
 
-👎 ЧТО НЕ НРАВИТСЯ:
-{data['disliked_text']}
+    ⭐ ЛЮБИМЫЕ АВТОРЫ (рекомендуй их другие книги):
+    {data['favorite_authors']}
 
-📚 В БИБЛИОТЕКЕ:
-{data['library_text']}
+    ❤️👍 ЧТО НРАВИТСЯ (рекомендуй что читают вместе с этим):
+    {data['liked_text']}
 
-Верни СТРОГО JSON:
-{{"comment": "комментарий", "books": [{{"title": "Название", "author": "Автор", "summary": "Описание", "genre": "Жанр", "reason": "Почему"}}]}}"""
+    👎 ЧТО НЕ НРАВИТСЯ (избегай):
+    {data['disliked_text']}
+
+    📚 В БИБЛИОТЕКЕ (не показывай):
+    {data['library_text']}
+
+    ⛔ УЖЕ ПОКАЗАНЫ (не повторяй):
+    {shown_text if shown_text else "Нет"}
+
+    Верни СТРОГО JSON:
+    {{"comment": "комментарий", "books": [{{"title": "Название", "author": "Автор", "summary": "Описание", "genre": "Жанр", "reason": "Почему читают вместе с ..."}}]}}"""
 
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -493,7 +442,8 @@ class BookRecommendationService:
                         "model": "deepseek-chat",
                         "messages": [
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": f"Порекомендуй {count} книг!"}
+                            {"role": "user",
+                             "content": f"Порекомендуй {count} книг, которые читают вместе с моими любимыми!"}
                         ],
                         "temperature": 0.7, "max_tokens": 3000,
                         "response_format": {"type": "json_object"}
@@ -512,61 +462,55 @@ class BookRecommendationService:
             print(f"❌ DeepSeek ошибка: {e}")
             return self._get_fallback_recommendations(count)
 
-    def _get_fallback_recommendations(self, count: int = 5) -> Dict[str, Any]:
-        all_books = [
-            {"title": "Три тела", "author": "Лю Цысинь", "summary": "Первый контакт с инопланетной цивилизацией.", "genre": "Научная фантастика", "reason": "Масштабное миростроение."},
-            {"title": "Песнь льда и пламени", "author": "Джордж Мартин", "summary": "Борьба за власть в фэнтези мире.", "genre": "Фэнтези", "reason": "Политические интриги."},
-            {"title": "Семь мужей Эвелин Хьюго", "author": "Тейлор Дженкинс Рейд", "summary": "История голливудской иконы.", "genre": "Романтическая проза", "reason": "Эмоциональная история."},
-            {"title": "Проект «Аве Мария»", "author": "Энди Вейер", "summary": "Астронавт спасает человечество.", "genre": "Научная фантастика", "reason": "Умная фантастика."},
-            {"title": "Тайная история", "author": "Донна Тартт", "summary": "Студенты и убийство.", "genre": "Психологический триллер", "reason": "Напряжённый сюжет."}
-        ]
-        return {"comment": "На основе ваших предпочтений.", "books": all_books[:count]}
+
+
+
+
+
 
     # ================================================================
     # УМНОЕ КЕШИРОВАНИЕ
     # ================================================================
 
     async def _filter_viewed_books(self, db: Session, user_id: str, books: List[Dict]) -> List[Dict]:
+        """Убирает ВСЕ книги которые уже показывались (из кеша и с реакциями)"""
         from models.sql_models import Рекомендации_реакции, Кеш_рекомендаций
 
+        # 1. Книги с реакциями
         reactions = db.query(Рекомендации_реакции).filter(
             Рекомендации_реакции.id_пользователя == user_id
         ).all()
         reacted_titles = {f"{r.title.lower()} — {r.author.lower()}" for r in reactions}
 
-        shown = db.query(Кеш_рекомендаций).filter(
-            Кеш_рекомендаций.id_пользователя == user_id,
-            Кеш_рекомендаций.is_used == True
+        # 2. ВСЕ книги из кеша (не только used)
+        all_cached = db.query(Кеш_рекомендаций).filter(
+            Кеш_рекомендаций.id_пользователя == user_id
         ).all()
-        shown_titles = set()
-        for cached in shown:
-            for b in (cached.books_json if isinstance(cached.books_json, list) else []):
-                shown_titles.add(f"{b.get('title', '').lower()} — {b.get('author', '').lower()}")
 
-        all_viewed = reacted_titles | shown_titles
+        cached_titles = set()
+        for cached in all_cached:
+            for b in (cached.books_json if isinstance(cached.books_json, list) else []):
+                cached_titles.add(f"{b.get('title', '').lower()} — {b.get('author', '').lower()}")
+
+        # 3. ВСЕ просмотренные
+        all_viewed = reacted_titles | cached_titles
 
         filtered = []
+        removed = 0
         for book in books:
             key = f"{book.get('title', '').lower()} — {book.get('author', '').lower()}"
             if key not in all_viewed:
                 filtered.append(book)
+            else:
+                removed += 1
+
+        if removed:
+            print(f"      🗑️ Удалено {removed} уже показанных книг")
         return filtered
 
-    def _save_to_cache(self, db: Session, user_id: str, result: Dict, batch: int):
-        from models.sql_models import Кеш_рекомендаций
-        try:
-            cache_entry = Кеш_рекомендаций(
-                id_пользователя=user_id,
-                books_json=result.get("books", []),
-                comment=result.get("comment", ""),
-                batch_number=batch, is_used=True,
-                expires_at=datetime.now() + timedelta(hours=24)
-            )
-            db.add(cache_entry)
-            db.commit()
-        except Exception as e:
-            print(f"⚠️ Кеш: {e}")
-            db.rollback()
+
+
+
 
     async def _clean_viewed_from_cache(self, db: Session, user_id: str):
         from models.sql_models import Кеш_рекомендаций, Рекомендации_реакции
@@ -596,9 +540,15 @@ class BookRecommendationService:
             print(f"⚠️ Очистка кеша: {e}")
             db.rollback()
 
+
+
+
+
+
     # ================================================================
     # ОСНОВНОЙ МЕТОД
     # ================================================================
+
 
     async def get_or_generate_recommendations(
             self, db: Session, user_id: str,
