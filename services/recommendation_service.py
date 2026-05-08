@@ -351,22 +351,29 @@ class BookRecommendationService:
         print(f"{'=' * 60}\n")
 
         all_books = []
-        shown_titles = set()  # 👈 Отслеживаем что уже показали
+        shown_titles = set()
 
         # Шаг 1: Коллаборативная фильтрация
         print("👥 Шаг 1: Похожие пользователи...")
         collab_books = await self._get_collaborative_recommendations(db, user_id, count)
+
+        collab_added = 0
         for book in collab_books:
             key = f"{book['title'].lower()} — {book['author'].lower()}"
             if key not in shown_titles:
                 shown_titles.add(key)
                 all_books.append(book)
+                collab_added += 1
 
-        # Шаг 2: DeepSeek (с указанием "читают вместе")
+        print(f"   👥 Добавлено: {collab_added} (из {len(collab_books)} найденных)")
+
+        # 👇 ВАЖНО: Если коллаборативные закончились — сразу включаем DeepSeek
         if len(all_books) < count:
-            print(f"🤖 Шаг 2: DeepSeek ({count - len(all_books)} книг)...")
-            deepseek_result = await self._generate_via_deepseek(data, count - len(all_books), batch_number,
-                                                                shown_titles)
+            needed = count - len(all_books)
+            print(f"🤖 Шаг 2: DeepSeek ({needed} книг)...")
+            deepseek_result = await self._generate_via_deepseek(data, needed, batch_number, shown_titles)
+
+            deepseek_added = 0
             for book in deepseek_result.get("books", []):
                 if len(all_books) >= count:
                     break
@@ -375,13 +382,44 @@ class BookRecommendationService:
                     shown_titles.add(key)
                     book["source"] = "deepseek"
                     all_books.append(book)
+                    deepseek_added += 1
+
+            print(f"   🤖 Добавлено: {deepseek_added}")
+
+        # 👇 Если всё ещё не хватает — пробуем Google Books
+        if len(all_books) < count:
+            needed = count - len(all_books)
+            print(f"📚 Шаг 3: Google Books ({needed} книг)...")
+            genres = []
+            for book in highly_rated_books:
+                if book.get('genre'):
+                    genres.append(book['genre'])
+
+            for genre in genres[:3]:
+                if len(all_books) >= count:
+                    break
+                gb_books = await self._search_google_books_by_genre(genre, needed)
+                for gb in gb_books:
+                    if len(all_books) >= count:
+                        break
+                    key = f"{gb['title'].lower()} — {gb['author'].lower()}"
+                    if key not in shown_titles:
+                        shown_titles.add(key)
+                        gb["source"] = "google_books"
+                        all_books.append(gb)
 
         print(f"   🎯 Итого: {len(all_books)} книг\n")
 
         return {
-            "comment": f"Подобрала для вас {len(all_books)} книг! Сначала — что нравится похожим читателям, затем — AI-рекомендации.",
+            "comment": f"Подобрала для вас {len(all_books)} книг!",
             "books": all_books[:count]
         }
+
+
+
+
+
+
 
     async def _generate_via_deepseek(self, data: Dict, count: int, batch_number: int, shown_titles: set = None) -> Dict[
         str, Any]:
