@@ -174,6 +174,11 @@ class BookRecommendationService:
         print(f"         ❌ Обложка не найдена")
         return None
 
+
+
+
+
+
     # ================================================================
     # СБОР ДАННЫХ ДЛЯ ПРОМПТА
     # ================================================================
@@ -682,3 +687,16 @@ class BookRecommendationService:
         return False
 
 recommendation_service = BookRecommendationService()
+
+
+
+
+
+
+
+
+
+
+
+
+

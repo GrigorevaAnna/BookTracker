@@ -3266,3 +3266,78 @@ def get_book_stats(
         "total_ratings": total_ratings
     }
 
+
+
+
+
+
+
+
+
+
+
+
+from services.character_chat_service import character_chat_service
+
+
+# ============================================
+# ЧАТЫ С ПЕРСОНАЖАМИ
+# ============================================
+
+@router.get("/characters", tags=["Чаты"])
+async def get_characters():
+    """Получить список доступных персонажей для чата"""
+    return {
+        "characters": character_chat_service.get_character_list()
+    }
+
+
+@router.get("/characters/{character_id}", tags=["Чаты"])
+async def get_character(character_id: str):
+    """Получить информацию о персонаже"""
+    character = character_chat_service.get_character(character_id)
+    if not character:
+        raise HTTPException(status_code=404, detail="Персонаж не найден")
+    return character
+
+
+@router.post("/characters/{character_id}/chat", tags=["Чаты"])
+async def chat_with_character(
+        character_id: str,
+        message: str = Query(...),
+        request: Request = None
+):
+    """
+    Отправить сообщение персонажу и получить ответ.
+
+    Персонажи:
+    - oblomov: Илья Ильич Обломов
+    - onegin: Евгений Онегин
+    - pechorin: Григорий Печорин
+    """
+    # Получаем историю из тела запроса (опционально)
+    history = []
+    if request:
+        try:
+            body = await request.json()
+            history = body.get("history", [])
+        except:
+            pass
+
+    character = character_chat_service.get_character(character_id)
+    if not character:
+        raise HTTPException(status_code=404, detail="Персонаж не найден")
+
+    result = await character_chat_service.chat_with_character(
+        character_id=character_id,
+        user_message=message,
+        chat_history=history
+    )
+
+    return {
+        "character_id": result["character_id"],
+        "character_name": character["name"],
+        "reply": result["reply"],
+        "timestamp": int(datetime.now().timestamp() * 1000)
+    }
+
