@@ -3334,10 +3334,9 @@ async def chat_with_character(
         chat_history=history
     )
 
+    # 👇 Возвращаем response (как ожидает фронт)
     return {
-        "character_id": result["character_id"],
-        "character_name": character["name"],
-        "reply": result["reply"],
-        "timestamp": int(datetime.now().timestamp() * 1000)
+        "response": result["reply"],  # 👈 было "reply", стало "response"
+        "characterId": result["character_id"]
     }
 
