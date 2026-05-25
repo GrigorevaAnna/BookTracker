@@ -2473,7 +2473,7 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
         Сессии.id_пользователя == user_id
     ).scalar() or 0
 
-    # 4. Среднее в день (минуты)
+    # 4. Собираем данные по дням
     sessions = db.query(Сессии.Дата_начала, Сессии.duration_minutes, Сессии.pages_read).filter(
         Сессии.id_пользователя == user_id
     ).all()
@@ -2492,10 +2492,10 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
             daily_minutes[date_str] = daily_minutes.get(date_str, 0) + (session.duration_minutes or 0)
             daily_pages[date_str] = daily_pages.get(date_str, 0) + (session.pages_read or 0)
 
-    # 4a. Всего дней чтения за всё время
+    # 4a. Всего дней чтения
     total_reading_days = len(daily_minutes)
 
-    # 4b. Среднее в день
+    # 4b. Среднее в день (минуты)
     if daily_minutes:
         avg_minutes = sum(daily_minutes.values()) // len(daily_minutes)
     else:
@@ -2507,7 +2507,7 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
     else:
         avg_pages = 0.0
 
-    # 4d. Лучший день по количеству страниц
+    # 4d. Лучший день
     best_day_pages = max(daily_pages.values()) if daily_pages else 0
     best_day_date = None
     if best_day_pages > 0:
@@ -2529,7 +2529,6 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
         except:
             pass
 
-    # Текущая серия
     today = datetime.now().date()
     current_streak = 0
     check_date = today
@@ -2537,7 +2536,6 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
         current_streak += 1
         check_date -= timedelta(days=1)
 
-    # Рекордная серия
     max_streak = 0
     current = 1
     for i in range(1, len(date_objects)):
@@ -2549,6 +2547,15 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
             current = 1
     max_streak = max(max_streak, current)
 
+    # 👇 6. Activity data за последние 30 дней
+    activity_data = {}
+    end_date = today
+    start_date = end_date - timedelta(days=29)  # 30 дней включая сегодня
+
+    for i in range(30):
+        check_date = (start_date + timedelta(days=i)).isoformat()
+        activity_data[check_date] = daily_pages.get(check_date, 0)
+
     return {
         "totalBooks": finished_count,
         "totalPages": total_pages,
@@ -2556,11 +2563,11 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
         "currentStreak": current_streak,
         "longestStreak": max_streak,
         "avgDailyMinutes": avg_minutes,
-        "totalReadingDays": total_reading_days,  # ← всего дней чтения
-        "avgDailyPages": avg_pages,  # ← среднее страниц в день
-        "bestDayPages": best_day_pages,  # ← рекорд страниц за день
-        "bestDayDate": best_day_date,  # ← дата рекорда
-        "activityData": {}
+        "totalReadingDays": total_reading_days,
+        "avgDailyPages": avg_pages,
+        "bestDayPages": best_day_pages,
+        "bestDayDate": best_day_date,
+        "activityData": activity_data  # ← теперь заполнено!
     }
 
 
