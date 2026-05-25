@@ -2444,7 +2444,6 @@ def get_reading_streak(
     }
 
 
-
 @router.get("/user/{user_id}/stats/all", tags=["Статистика"])
 def get_all_stats(user_id: str, db: Session = Depends(get_db)):
     """
@@ -2474,48 +2473,55 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
         Сессии.id_пользователя == user_id
     ).scalar() or 0
 
-    # 4. Среднее в день
-    sessions = db.query(Сессии.Дата_начала, Сессии.duration_minutes).filter(
+    # 4. Среднее в день (минуты)
+    sessions = db.query(Сессии.Дата_начала, Сессии.duration_minutes, Сессии.pages_read).filter(
         Сессии.id_пользователя == user_id
     ).all()
 
-    daily_totals = {}
+    daily_minutes = {}
+    daily_pages = {}
+
     for session in sessions:
-        # Обработка разных типов даты
         if session.Дата_начала:
-            # Если это объект date, преобразуем в строку
             if hasattr(session.Дата_начала, 'isoformat'):
                 date_str = session.Дата_начала.isoformat()
             else:
-                # Если строка
                 date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
                     session.Дата_начала)
 
-            daily_totals[date_str] = daily_totals.get(date_str, 0) + (session.duration_minutes or 0)
+            daily_minutes[date_str] = daily_minutes.get(date_str, 0) + (session.duration_minutes or 0)
+            daily_pages[date_str] = daily_pages.get(date_str, 0) + (session.pages_read or 0)
 
-    if daily_totals:
-        avg_minutes = sum(daily_totals.values()) // len(daily_totals)
-        avg_hours = round(avg_minutes / 60, 1)
+    # 4a. Всего дней чтения за всё время
+    total_reading_days = len(daily_minutes)
+
+    # 4b. Среднее в день
+    if daily_minutes:
+        avg_minutes = sum(daily_minutes.values()) // len(daily_minutes)
     else:
         avg_minutes = 0
-        avg_hours = 0
+
+    # 4c. Среднее страниц в день
+    if daily_pages:
+        avg_pages = round(sum(daily_pages.values()) / len(daily_pages), 1)
+    else:
+        avg_pages = 0.0
+
+    # 4d. Лучший день по количеству страниц
+    best_day_pages = max(daily_pages.values()) if daily_pages else 0
+    best_day_date = None
+    if best_day_pages > 0:
+        for date_str, pages in daily_pages.items():
+            if pages == best_day_pages:
+                best_day_date = date_str
+                break
 
     # 5. Серии (streak)
-    dates = set()
-    for session in sessions:
-        if session.Дата_начала:
-            if hasattr(session.Дата_начала, 'isoformat'):
-                date_str = session.Дата_начала.isoformat()
-            else:
-                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
-                    session.Дата_начала)
-            dates.add(date_str)
-
+    dates = set(daily_minutes.keys())
     sorted_dates = sorted(dates)
     date_objects = []
     for d in sorted_dates:
         try:
-            # Пробуем распарсить строку
             if isinstance(d, str):
                 date_objects.append(datetime.strptime(d, '%Y-%m-%d').date())
             else:
@@ -2544,14 +2550,20 @@ def get_all_stats(user_id: str, db: Session = Depends(get_db)):
     max_streak = max(max_streak, current)
 
     return {
-        "totalBooks": finished_count,           # было finished_books
-        "totalPages": total_pages,              # было total_pages_read
-        "totalReadingMinutes": total_minutes,   # было total_minutes_read
-        "currentStreak": current_streak,        # было current_streak
-        "longestStreak": max_streak,            # было record_streak
-        "avgDailyMinutes": avg_minutes,         # было average_minutes_per_day
-        "activityData": {}  # если нужно, добавьте данные по дням
+        "totalBooks": finished_count,
+        "totalPages": total_pages,
+        "totalReadingMinutes": total_minutes,
+        "currentStreak": current_streak,
+        "longestStreak": max_streak,
+        "avgDailyMinutes": avg_minutes,
+        "totalReadingDays": total_reading_days,  # ← всего дней чтения
+        "avgDailyPages": avg_pages,  # ← среднее страниц в день
+        "bestDayPages": best_day_pages,  # ← рекорд страниц за день
+        "bestDayDate": best_day_date,  # ← дата рекорда
+        "activityData": {}
     }
+
+
 
 
 @router.get("/user/{user_id}/stats/pages-per-day", tags=["Статистика"])
