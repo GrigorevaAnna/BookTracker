@@ -2,6 +2,12 @@
 from typing import List, Dict, Any, Optional
 import httpx
 import re
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+
+GOOGLE_BOOKS_API_KEY = os.getenv("GOOGLE_BOOKS_API_KEY")
 
 
 def fix_cover_url(url: str) -> str:
@@ -49,7 +55,11 @@ class CombinedSearchService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
                     "https://www.googleapis.com/books/v1/volumes",
-                    params={"q": query, "maxResults": 30}
+                    params={
+                        "q": query,
+                        "maxResults": 30,
+                        "key": os.getenv("GOOGLE_BOOKS_API_KEY")  # ← ДОЛЖНО БЫТЬ!
+                    }
                 )
 
                 if response.status_code != 200:
@@ -171,6 +181,37 @@ class CombinedSearchService:
         except Exception as e:
             print(f"OpenLibrary ошибка: {e}")
             return []
+
+    # В services/book_search.py, метод search_all
+    async def search_all(self, query: str, db=None) -> List[Dict[str, Any]]:
+        """Поиск во всех внешних источниках"""
+        results = []
+
+        try:
+            google_results = await self._search_google_books(query)
+            print(f"   Google Books: {len(google_results)} результатов")
+            results.extend(google_results)
+        except Exception as e:
+            print(f"   ❌ Google Books ошибка: {e}")
+
+        try:
+            openlib_results = await self._search_openlibrary(query)
+            print(f"   OpenLibrary: {len(openlib_results)} результатов")
+            results.extend(openlib_results)
+        except Exception as e:
+            print(f"   ❌ OpenLibrary ошибка: {e}")
+
+        # Удаляем дубликаты
+        seen_keys = set()
+        unique_results = []
+        for book in results:
+            key = f"{book.get('title', '')}_{book.get('author', '')}"
+            if key not in seen_keys:
+                seen_keys.add(key)
+                unique_results.append(book)
+
+        print(f"   Всего найдено: {len(unique_results)} книг")
+        return unique_results
 
 
 combined_search = CombinedSearchService()
