@@ -3376,6 +3376,7 @@ def get_daily_details(
     - количество прочитанных страниц
     - затраченное время в минутах
     - количество сессий чтения
+    - информация о книгах, которые читали в этот день
     """
     from datetime import datetime, timedelta
 
@@ -3408,12 +3409,26 @@ def get_daily_details(
                     "date": date_str,
                     "pages_read": 0,
                     "minutes_read": 0,
-                    "sessions_count": 0
+                    "sessions_count": 0,
+                    "books": []
                 }
 
             daily_data[date_str]["pages_read"] += session.pages_read or 0
             daily_data[date_str]["minutes_read"] += session.duration_minutes or 0
             daily_data[date_str]["sessions_count"] += 1
+
+            # Получаем информацию о книге
+            book = db.query(Книги).filter(Книги.id_книги == session.id_книги).first()
+            if book:
+                daily_data[date_str]["books"].append({
+                    "book_id": book.id_книги,
+                    "title": book.Название,
+                    "author": book.Автор,
+                    "start_page": session.Начальная_страница,
+                    "end_page": session.Последняя_страница,
+                    "pages_read": session.pages_read or 0,
+                    "duration_minutes": session.duration_minutes or 0
+                })
 
     # Заполняем все дни (включая пустые)
     result = []
@@ -3426,7 +3441,8 @@ def get_daily_details(
                 "date": check_date,
                 "pages_read": 0,
                 "minutes_read": 0,
-                "sessions_count": 0
+                "sessions_count": 0,
+                "books": []
             })
 
     # Суммарная статистика за период
