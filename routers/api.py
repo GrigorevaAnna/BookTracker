@@ -3363,3 +3363,86 @@ async def chat_with_character(
         "characterId": result["character_id"]
     }
 
+
+@router.get("/user/{user_id}/stats/daily-details", tags=["Статистика"])
+def get_daily_details(
+        user_id: str,
+        days: int = Query(30, ge=1, le=90),
+        db: Session = Depends(get_db)
+):
+    """
+    Получить детальную статистику по дням:
+    - дата
+    - количество прочитанных страниц
+    - затраченное время в минутах
+    - количество сессий чтения
+    """
+    from datetime import datetime, timedelta
+
+    user = db.query(Аккаунты).filter(Аккаунты.id_пользователя == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    sessions = db.query(Сессии).filter(
+        and_(
+            Сессии.id_пользователя == user_id,
+            Сессии.Дата_начала >= start_date.isoformat()
+        )
+    ).all()
+
+    # Группируем по дням
+    daily_data = {}
+    for session in sessions:
+        if session.Дата_начала:
+            if hasattr(session.Дата_начала, 'isoformat'):
+                date_str = session.Дата_начала.isoformat()
+            else:
+                date_str = str(session.Дата_начала).split('T')[0] if 'T' in str(session.Дата_начала) else str(
+                    session.Дата_начала)
+
+            if date_str not in daily_data:
+                daily_data[date_str] = {
+                    "date": date_str,
+                    "pages_read": 0,
+                    "minutes_read": 0,
+                    "sessions_count": 0
+                }
+
+            daily_data[date_str]["pages_read"] += session.pages_read or 0
+            daily_data[date_str]["minutes_read"] += session.duration_minutes or 0
+            daily_data[date_str]["sessions_count"] += 1
+
+    # Заполняем все дни (включая пустые)
+    result = []
+    for i in range(days):
+        check_date = (start_date + timedelta(days=i)).isoformat()
+        if check_date in daily_data:
+            result.append(daily_data[check_date])
+        else:
+            result.append({
+                "date": check_date,
+                "pages_read": 0,
+                "minutes_read": 0,
+                "sessions_count": 0
+            })
+
+    # Суммарная статистика за период
+    total_pages = sum(d["pages_read"] for d in result)
+    total_minutes = sum(d["minutes_read"] for d in result)
+    active_days = sum(1 for d in result if d["sessions_count"] > 0)
+
+    return {
+        "user_id": user_id,
+        "period_days": days,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "total_pages": total_pages,
+        "total_minutes": total_minutes,
+        "active_days": active_days,
+        "avg_pages_per_day": round(total_pages / days, 1),
+        "avg_minutes_per_day": round(total_minutes / days, 1),
+        "daily_data": result
+    }
